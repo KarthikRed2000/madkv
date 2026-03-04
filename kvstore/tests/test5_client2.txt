@@ -1,0 +1,6 @@
+GET keyA
+PUT keyC value3
+SCAN keyA keyZ
+DELETE keyB
+SCAN keyA keyZ
+STOP

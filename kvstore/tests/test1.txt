@@ -1,0 +1,7 @@
+PUT key1 value1
+GET key1
+SWAP key1 newvalue1
+GET key1
+DELETE key1
+GET key1
+STOP

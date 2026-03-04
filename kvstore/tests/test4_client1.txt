@@ -1,0 +1,5 @@
+PUT shared_key initial
+GET shared_key
+SWAP shared_key client1_value
+GET shared_key
+STOP

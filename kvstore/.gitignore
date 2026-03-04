@@ -1,0 +1,3 @@
+build/
+bin/kvserver
+bin/kvclient

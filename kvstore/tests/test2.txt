@@ -1,0 +1,9 @@
+PUT apple red
+PUT banana yellow
+PUT cherry red
+SCAN apple cherry
+DELETE banana
+SCAN apple cherry
+SWAP apple green
+GET apple
+STOP

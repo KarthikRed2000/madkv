@@ -6,58 +6,64 @@ default:
 
 # install extra dependencies of your KV code
 deps:
-    # FIXME: your dependency installation commands here
+    #!/usr/bin/env bash
+    # Install gRPC, Protobuf, and CMake on Ubuntu 22.04
+    sudo apt update
+    sudo apt install -y build-essential cmake pkg-config
+    sudo apt install -y libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
+    sudo apt install -y default-jre
 
 # build your executables in release mode
 build:
-    # FIXME: your build commands here (don't include clean)
+    #!/usr/bin/env bash
+    cd kvstore
+    mkdir -p build
+    cd build
+    cmake -DCMAKE_BUILD_TYPE=Release ..
+    # Use nproc on Linux, sysctl on macOS
+    if command -v nproc > /dev/null; then
+        make -j$(nproc)
+    else
+        make -j$(sysctl -n hw.ncpu)
+    fi
+    cmake --install .
 
 # clean the build of your executables
 clean:
-    # FIXME: your clean commands here
+    rm -rf kvstore/build kvstore/bin/kvserver kvstore/bin/kvclient
 
 # run your KV store server
 server listen="0.0.0.0:3777":
-    # FIXME: your server run command here, listening on addr for new clients
+    ./kvstore/bin/kvserver {{listen}}
 
 # run you KV store client in stdin/out interface mode
 client server="127.0.0.1:3777":
-    # FIXME: your client run command here, connecting to server at addr
+    ./kvstore/bin/kvclient {{server}}
 
 # run your KV store testcase 1 client
 test1 server="127.0.0.1:3777":
-    # FIXME: your testcase 1 client run command here
-    #        for testcases, feel free to reuse 'just p1::client' if you
-    #        designed your clients this way, or invoke different executables
+    cat kvstore/tests/test1.txt | ./kvstore/bin/kvclient {{server}}
 
 # run your KV store testcase 2 client
 test2 server="127.0.0.1:3777":
-    # FIXME: your testcase 2 client run command here
+    cat kvstore/tests/test2.txt | ./kvstore/bin/kvclient {{server}}
 
 # run your KV store testcase 3 client
 test3 server="127.0.0.1:3777":
-    # FIXME: your testcase 3 client run command here
+    ./kvstore/tests/run_multi_client.sh {{server}} 3
 
 # run your KV store testcase 4 client(s)
 test4 server="127.0.0.1:3777":
-    # FIXME: your testcase 4 client(s) run commands here
-    #        for multi-client testcases, this recipe should run multiple
-    #        concurrent client processes; you may write an additional runner
-    #        utility or a scripting layer to manage multiple processes
+    ./kvstore/tests/run_multi_client.sh {{server}} 4
 
 # run your KV store testcase 5 client(s)
 test5 server="127.0.0.1:3777":
-    # FIXME: your testcase 5 client(s) run commands here
+    ./kvstore/tests/run_multi_client.sh {{server}} 5
 
 # kill all processes of your KV store system
 kill:
-    # FIXME: your kill commands here
-    #        make sure that it kills all server, clients, and any extra helper
-    #        processes of your system; redirecting both out & err to /dev/null
-    #        is recommended
-    #   TIP: commands such as 'pkill' may return non-zero exit code on success,
-    #        which would by default abort the 'just' recipe early; prepend the
-    #        command with a '-' sign to ignore its exit code
+    -pkill -9 kvserver > /dev/null 2>&1
+    -pkill -9 kvclient > /dev/null 2>&1
 
 # NOTE: feel free to add more recipes as you see fit...
 #       also feel free to add extra parameters to the recipes as you see fit,

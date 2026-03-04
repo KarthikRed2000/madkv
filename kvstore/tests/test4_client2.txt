@@ -1,0 +1,5 @@
+GET shared_key
+SWAP shared_key client2_value
+GET shared_key
+DELETE shared_key
+STOP

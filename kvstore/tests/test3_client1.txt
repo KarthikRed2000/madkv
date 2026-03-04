@@ -1,0 +1,6 @@
+PUT user1_key1 value1
+PUT user1_key2 value2
+GET user1_key1
+SCAN user1_key1 user1_key2
+DELETE user1_key1
+STOP
