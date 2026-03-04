@@ -32,6 +32,6 @@ target/
 
 # Project-specific
 ycsb/
-report/
+#report/
 backer.*/
 .remotes
