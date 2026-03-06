@@ -19,13 +19,19 @@ set -euo pipefail
 # Example:
 #   ./scripts/run_p2_custom_testcase.sh 10.10.1.2
 
-MANAGER_IP="${1:-127.0.0.1}"
+INPUT_MANAGER_IP="${1:-127.0.0.1}"
+CLUSTER_IP="127.0.0.1"
 MANAGER_PORT=3666
 BASE_PORT=3777
-MANAGER_ADDR="${MANAGER_IP}:${MANAGER_PORT}"
+MANAGER_ADDR="${CLUSTER_IP}:${MANAGER_PORT}"
 RUN_DIR="/tmp/madkv-p2/custom-testcase"
 
 cd "$(dirname "$0")/.."
+
+if [[ "${INPUT_MANAGER_IP}" != "127.0.0.1" && "${INPUT_MANAGER_IP}" != "localhost" ]]; then
+  echo "==> Note: custom testcase runs a local single-host cluster."
+  echo "==> Ignoring manager_ip=${INPUT_MANAGER_IP}; using ${CLUSTER_IP}."
+fi
 
 mkdir -p "${RUN_DIR}"
 
@@ -81,7 +87,7 @@ rm -rf "${RUN_DIR}/backer.s0" "${RUN_DIR}/backer.s1" "${RUN_DIR}/backer.s2"
 mkdir -p "${RUN_DIR}/backer.s0" "${RUN_DIR}/backer.s1" "${RUN_DIR}/backer.s2"
 
 ./kvstore/bin/kvmanager "0.0.0.0:${MANAGER_PORT}" \
-  "${MANAGER_IP}:3777,${MANAGER_IP}:3778,${MANAGER_IP}:3779" \
+  "${CLUSTER_IP}:3777,${CLUSTER_IP}:3778,${CLUSTER_IP}:3779" \
   >"${RUN_DIR}/manager.log" 2>&1 &
 M_PID=$!
 
@@ -127,7 +133,7 @@ if kill -0 "${S1_PID}" >/dev/null 2>&1; then
 fi
 
 echo "==> Step 5: GET/SCAN on unaffected partition (s0) should succeed"
-cat <<EOF | ./kvstore/bin/kvclient "${MANAGER_IP}:3777" | tee "${RUN_DIR}/step5_unaffected.log"
+cat <<EOF | ./kvstore/bin/kvclient "${CLUSTER_IP}:3777" | tee "${RUN_DIR}/step5_unaffected.log"
 GET ${K0}
 SCAN ${K0} ${K0}
 STOP
@@ -135,7 +141,7 @@ EOF
 
 echo "==> Step 6: GET on failed partition should timeout"
 set +e
-cat <<EOF | "${TIMEOUT_BIN}" 6s ./kvstore/bin/kvclient "${MANAGER_IP}:3778" \
+cat <<EOF | "${TIMEOUT_BIN}" 6s ./kvstore/bin/kvclient "${CLUSTER_IP}:3778" \
   >"${RUN_DIR}/step6_failed_partition.log" 2>&1
 GET ${K1}
 STOP
@@ -159,7 +165,7 @@ S1_PID=$!
 sleep 2
 
 echo "==> Step 8: GET after recovery should return latest value"
-cat <<EOF | ./kvstore/bin/kvclient "${MANAGER_IP}:3778" | tee "${RUN_DIR}/step8_recovered.log"
+cat <<EOF | ./kvstore/bin/kvclient "${CLUSTER_IP}:3778" | tee "${RUN_DIR}/step8_recovered.log"
 GET ${K1}
 STOP
 EOF
