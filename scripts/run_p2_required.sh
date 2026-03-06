@@ -158,6 +158,14 @@ run_bench_case() {
   stop_cluster
 }
 
+echo "==> Running custom deterministic testcase"
+if [[ -x "./scripts/run_p2_custom_testcase.sh" ]]; then
+  ./scripts/run_p2_custom_testcase.sh "${MANAGER_IP}"
+else
+  echo "Custom testcase script not found/executable, skipping."
+fi
+
+
 echo "==> Running required fuzz tests"
 run_fuzz_no_crash 3
 run_fuzz_with_crash 3
