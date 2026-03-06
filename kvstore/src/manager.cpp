@@ -1,6 +1,8 @@
 #include <grpcpp/grpcpp.h>
 
 #include <cstdint>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -22,6 +24,18 @@ using kvstore::PartitionInfo;
 using kvstore::RegisterServerRequest;
 using kvstore::RegisterServerResponse;
 
+static std::string NowTs() {
+  const auto now = std::chrono::system_clock::now();
+  const auto t = std::chrono::system_clock::to_time_t(now);
+  std::ostringstream oss;
+  oss << std::put_time(std::localtime(&t), "%F %T");
+  return oss.str();
+}
+
+static void Log(const std::string& msg) {
+  std::cerr << "[" << NowTs() << "] [manager] " << msg << std::endl;
+}
+
 static std::vector<std::string> SplitCsv(const std::string& csv) {
   std::vector<std::string> out;
   std::stringstream ss(csv);
@@ -38,7 +52,10 @@ class ClusterManagerService final : public ClusterManager::Service {
  public:
   explicit ClusterManagerService(std::vector<std::string> expected_servers)
       : expected_servers_(std::move(expected_servers)),
-        registered_(expected_servers_.size(), false) {}
+        registered_(expected_servers_.size(), false) {
+    Log("expected server endpoints count=" +
+        std::to_string(expected_servers_.size()));
+  }
 
   Status RegisterServer(ServerContext* context, const RegisterServerRequest* request,
                         RegisterServerResponse* response) override {
@@ -46,6 +63,8 @@ class ClusterManagerService final : public ClusterManager::Service {
     std::lock_guard<std::mutex> lock(mu_);
     const uint32_t sid = request->server_id();
     if (sid >= expected_servers_.size()) {
+      Log("register rejected sid=" + std::to_string(sid) +
+          " api_addr=" + request->api_addr() + " reason=invalid_id");
       response->set_ok(false);
       response->set_error("invalid server id");
       return Status::OK;
@@ -57,6 +76,9 @@ class ClusterManagerService final : public ClusterManager::Service {
     // readiness and identity checks here.
 
     registered_[sid] = true;
+    Log("server registered sid=" + std::to_string(sid) +
+        " api_addr=" + request->api_addr() +
+        " mapped_to=" + expected_servers_[sid]);
     response->set_ok(true);
     response->set_partition_id(sid);
     response->set_num_partitions(static_cast<uint32_t>(expected_servers_.size()));
@@ -77,6 +99,11 @@ class ClusterManagerService final : public ClusterManager::Service {
       }
     }
     response->set_ready(ready);
+    if (!has_last_ready_ || ready != last_ready_) {
+      Log(std::string("cluster ready state changed: ") + (ready ? "ready" : "not_ready"));
+      has_last_ready_ = true;
+      last_ready_ = ready;
+    }
 
     for (uint32_t i = 0; i < expected_servers_.size(); ++i) {
       PartitionInfo* p = response->add_partitions();
@@ -92,6 +119,8 @@ class ClusterManagerService final : public ClusterManager::Service {
   std::mutex mu_;
   std::vector<std::string> expected_servers_;
   std::vector<bool> registered_;
+  bool has_last_ready_ = false;
+  bool last_ready_ = false;
 };
 
 static void RunManager(const std::string& listen_addr, const std::string& servers_csv) {
@@ -99,6 +128,7 @@ static void RunManager(const std::string& listen_addr, const std::string& server
   if (expected_servers.empty()) {
     throw std::runtime_error("servers csv is empty");
   }
+  Log("startup listen_addr=" + listen_addr + " servers_csv=" + servers_csv);
 
   ClusterManagerService service(expected_servers);
 

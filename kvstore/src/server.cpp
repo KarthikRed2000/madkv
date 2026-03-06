@@ -4,10 +4,13 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -36,9 +39,21 @@ using kvstore::ScanResponse;
 using kvstore::SwapRequest;
 using kvstore::SwapResponse;
 
+static std::string NowTs() {
+  const auto now = std::chrono::system_clock::now();
+  const auto t = std::chrono::system_clock::to_time_t(now);
+  std::ostringstream oss;
+  oss << std::put_time(std::localtime(&t), "%F %T");
+  return oss.str();
+}
+
+static void Log(const std::string& msg) {
+  std::cerr << "[" << NowTs() << "] [server] " << msg << std::endl;
+}
+
 class KVStoreServiceImpl final : public KVStore::Service {
  public:
-  explicit KVStoreServiceImpl(const std::string& db_path) {
+  explicit KVStoreServiceImpl(const std::string& db_path) : db_path_(db_path) {
     rocksdb::Options options;
     options.create_if_missing = true;
     rocksdb::Status s = rocksdb::DB::Open(options, db_path, &db_);
@@ -46,6 +61,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
       throw std::runtime_error("failed to open RocksDB at " + db_path + ": " +
                                s.ToString());
     }
+    Log("rocksdb opened path=" + db_path_);
   }
 
   ~KVStoreServiceImpl() override { delete db_; }
@@ -61,6 +77,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
     bool found = get_s.ok();
     if (!found && !get_s.IsNotFound()) {
+      Log("Put read error key=" + key + " status=" + get_s.ToString());
       return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
     }
 
@@ -68,6 +85,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     write_opts.sync = true;
     rocksdb::Status put_s = db_->Put(write_opts, key, value);
     if (!put_s.ok()) {
+      Log("Put write error key=" + key + " status=" + put_s.ToString());
       return Status(grpc::StatusCode::INTERNAL, put_s.ToString());
     }
 
@@ -90,6 +108,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     } else if (get_s.IsNotFound()) {
       response->set_found(false);
     } else {
+      Log("Swap read error key=" + key + " status=" + get_s.ToString());
       return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
     }
 
@@ -97,6 +116,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     write_opts.sync = true;
     rocksdb::Status put_s = db_->Put(write_opts, key, value);
     if (!put_s.ok()) {
+      Log("Swap write error key=" + key + " status=" + put_s.ToString());
       return Status(grpc::StatusCode::INTERNAL, put_s.ToString());
     }
     return Status::OK;
@@ -115,6 +135,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     } else if (get_s.IsNotFound()) {
       response->set_found(false);
     } else {
+      Log("Get read error key=" + key + " status=" + get_s.ToString());
       return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
     }
     return Status::OK;
@@ -136,6 +157,8 @@ class KVStoreServiceImpl final : public KVStore::Service {
       entry->set_value(it->value().ToString());
     }
     if (!it->status().ok()) {
+      Log("Scan iterator error start=" + start_key + " end=" + end_key +
+          " status=" + it->status().ToString());
       return Status(grpc::StatusCode::INTERNAL, it->status().ToString());
     }
     return Status::OK;
@@ -150,6 +173,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     std::string old_value;
     rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
     if (!get_s.ok() && !get_s.IsNotFound()) {
+      Log("Delete read error key=" + key + " status=" + get_s.ToString());
       return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
     }
     bool found = get_s.ok();
@@ -158,6 +182,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
       write_opts.sync = true;
       rocksdb::Status del_s = db_->Delete(write_opts, key);
       if (!del_s.ok()) {
+        Log("Delete write error key=" + key + " status=" + del_s.ToString());
         return Status(grpc::StatusCode::INTERNAL, del_s.ToString());
       }
     }
@@ -166,6 +191,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
   }
 
  private:
+  std::string db_path_;
   rocksdb::DB* db_ = nullptr;
   mutable std::mutex mu_;
 };
@@ -183,12 +209,22 @@ static bool RegisterToManager(uint32_t sid, const std::string& manager_addr,
   ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
 
   grpc::Status s = stub->RegisterServer(&ctx, req, &res);
-  return s.ok() && res.ok();
+  if (s.ok() && res.ok()) {
+    Log("registered to manager sid=" + std::to_string(sid) + " manager=" +
+        manager_addr + " api_addr=" + api_addr);
+    return true;
+  }
+  Log("register attempt failed sid=" + std::to_string(sid) +
+      " manager=" + manager_addr +
+      " grpc_ok=" + std::string(s.ok() ? "true" : "false") +
+      (s.ok() ? "" : " err=" + s.error_message()));
+  return false;
 }
 
 static void WaitForClusterReady(const std::string& manager_addr) {
   auto channel = grpc::CreateChannel(manager_addr, grpc::InsecureChannelCredentials());
   auto stub = ClusterManager::NewStub(channel);
+  int attempts = 0;
   while (true) {
     GetClusterRequest req;
     GetClusterResponse res;
@@ -196,7 +232,13 @@ static void WaitForClusterReady(const std::string& manager_addr) {
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
     grpc::Status s = stub->GetCluster(&ctx, req, &res);
     if (s.ok() && res.ready()) {
+      Log("cluster ready from manager=" + manager_addr);
       return;
+    }
+    attempts++;
+    if (attempts % 10 == 0) {
+      Log("waiting for cluster ready manager=" + manager_addr +
+          " attempts=" + std::to_string(attempts));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
@@ -208,8 +250,7 @@ static void RunServer(const std::string& listen_addr, const std::string& db_path
   builder.AddListeningPort(listen_addr, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "Server listening on " << listen_addr << " (db=" << db_path << ")"
-            << std::endl;
+  Log("listening on " + listen_addr + " db=" + db_path);
   server->Wait();
 }
 
@@ -233,6 +274,8 @@ int main(int argc, char** argv) {
       std::string listen_addr = "0.0.0.0:" + api_port;
 
       std::filesystem::create_directories(backer_path);
+      Log("p2 startup sid=" + std::to_string(sid) + " manager=" + manager_addr +
+          " api_port=" + api_port + " backer=" + backer_path);
 
       while (!RegisterToManager(sid, manager_addr, listen_addr)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
