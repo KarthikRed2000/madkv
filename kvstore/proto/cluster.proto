@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package kvstore;
+
+service ClusterManager {
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
+  rpc GetCluster(GetClusterRequest) returns (GetClusterResponse);
+}
+
+message RegisterServerRequest {
+  uint32 server_id = 1;
+  string api_addr = 2;
+}
+
+message RegisterServerResponse {
+  bool ok = 1;
+  uint32 partition_id = 2;
+  uint32 num_partitions = 3;
+  string error = 4;
+}
+
+message GetClusterRequest {}
+
+message PartitionInfo {
+  uint32 partition_id = 1;
+  uint32 server_id = 2;
+  string api_addr = 3;
+  bool registered = 4;
+}
+
+message GetClusterResponse {
+  bool ready = 1;
+  repeated PartitionInfo partitions = 2;
+}
