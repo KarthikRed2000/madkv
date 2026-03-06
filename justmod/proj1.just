@@ -11,26 +11,24 @@ deps:
     sudo apt update
     sudo apt install -y build-essential cmake pkg-config
     sudo apt install -y libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
+    sudo apt install -y librocksdb-dev
     sudo apt install -y default-jre
 
 # build your executables in release mode
 build:
     #!/usr/bin/env bash
+    set -euo pipefail
     cd kvstore
     mkdir -p build
     cd build
     cmake -DCMAKE_BUILD_TYPE=Release ..
-    # Use nproc on Linux, sysctl on macOS
-    if command -v nproc > /dev/null; then
-        make -j$(nproc)
-    else
-        make -j$(sysctl -n hw.ncpu)
-    fi
+    jobs=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+    make -j"${jobs}"
     cmake --install .
 
 # clean the build of your executables
 clean:
-    rm -rf kvstore/build kvstore/bin/kvserver kvstore/bin/kvclient
+    rm -rf kvstore/build kvstore/bin/kvserver kvstore/bin/kvclient kvstore/bin/kvmanager
 
 # run your KV store server
 server listen="0.0.0.0:3777":
