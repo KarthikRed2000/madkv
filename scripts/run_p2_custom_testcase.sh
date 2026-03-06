@@ -118,8 +118,13 @@ STOP
 EOF
 
 echo "==> Step 4: kill server for partition 1 (s1)"
-kill "${S1_PID}" >/dev/null 2>&1 || true
+# Use SIGKILL for deterministic failure behavior in automated runs.
+kill -9 "${S1_PID}" >/dev/null 2>&1 || true
 wait "${S1_PID}" 2>/dev/null || true
+if kill -0 "${S1_PID}" >/dev/null 2>&1; then
+  echo "Failed to stop server process for partition 1 (pid=${S1_PID})."
+  exit 1
+fi
 
 echo "==> Step 5: GET/SCAN on unaffected partition (s0) should succeed"
 cat <<EOF | ./kvstore/bin/kvclient "${MANAGER_IP}:3777" | tee "${RUN_DIR}/step5_unaffected.log"
@@ -141,6 +146,8 @@ set -e
 if [[ "${STEP6_RC}" -ne 124 ]]; then
   echo "Expected timeout (124) for failed partition GET, got ${STEP6_RC}"
   echo "See ${RUN_DIR}/step6_failed_partition.log"
+  echo "Recent server logs:"
+  tail -n 20 "${RUN_DIR}/s1.log" || true
   exit 1
 fi
 echo "Observed expected timeout while partition server was down."
