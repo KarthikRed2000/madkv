@@ -51,10 +51,10 @@ class ClusterManagerService final : public ClusterManager::Service {
       return Status::OK;
     }
 
-    // Track the live advertised address so clients can connect to restarted nodes.
-    if (!request->api_addr().empty()) {
-      expected_servers_[sid] = request->api_addr();
-    }
+    // Keep the configured public endpoint from manager startup args.
+    // Servers currently register "0.0.0.0:<port>" as listen address, which is
+    // not routable from remote client nodes. We only use registration for
+    // readiness and identity checks here.
 
     registered_[sid] = true;
     response->set_ok(true);
