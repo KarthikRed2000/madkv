@@ -100,7 +100,7 @@ class DirectClient {
   void DoWithRetry(RpcFn rpc) {
     while (true) {
       ClientContext ctx;
-      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
       Status s = rpc(ctx);
       if (s.ok()) {
         return;
@@ -215,7 +215,7 @@ class PartitionedClient {
       GetClusterRequest req;
       GetClusterResponse res;
       ClientContext ctx;
-      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
       Status s = manager_stub->GetCluster(&ctx, req, &res);
       if (s.ok() && res.ready() && res.partitions_size() > 0) {
         stubs_.clear();
@@ -233,15 +233,16 @@ class PartitionedClient {
   void DoOnPartitionWithRetry(size_t partition, RpcFn rpc) {
     while (true) {
       ClientContext ctx;
-      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
       Status s = rpc(stubs_.at(partition).get(), ctx);
       if (s.ok()) {
         return;
       }
-      // Server crash/restart or stale mapping: refresh then retry forever.
       std::this_thread::sleep_for(std::chrono::milliseconds(300));
-      RefreshClusterWithRetry();
-      partition = std::min(partition, stubs_.size() - 1);
+      if (s.error_code() == grpc::StatusCode::UNAVAILABLE) {
+        RefreshClusterWithRetry();
+        partition = std::min(partition, stubs_.size() - 1);
+      }
     }
   }
 
