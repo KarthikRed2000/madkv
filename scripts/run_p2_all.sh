@@ -3,7 +3,7 @@ set -euo pipefail
 
 NODE0_IP="10.10.1.1"
 NODE1_IP="10.10.1.2"
-MANAGER="${NODE0_IP}:3666"
+MANAGER="${NODE1_IP}:3666"
 MADKV="$HOME/madkv"
 BACKER="/tmp/madkv-p2-backer/backer"
 PLOG="/tmp/madkv-p2-progress.log"
@@ -19,14 +19,14 @@ remote() {
 
 get_servers() {
     case "$1" in
-        1) echo "${NODE0_IP}:3777" ;;
-        3) echo "${NODE0_IP}:3777,${NODE0_IP}:3778,${NODE1_IP}:3777" ;;
-        5) echo "${NODE0_IP}:3777,${NODE0_IP}:3778,${NODE0_IP}:3779,${NODE1_IP}:3777,${NODE1_IP}:3778" ;;
+        1) echo "${NODE1_IP}:3777" ;;
+        3) echo "${NODE1_IP}:3777,${NODE1_IP}:3778,${NODE1_IP}:3779" ;;
+        5) echo "${NODE1_IP}:3777,${NODE1_IP}:3778,${NODE1_IP}:3779,${NODE1_IP}:3780,${NODE1_IP}:3781" ;;
     esac
 }
 
 kill_cluster() {
-    cd "$MADKV" && just p2::kill 2>/dev/null || true
+    just p2::kill 2>/dev/null || true
     remote "cd $MADKV && just p2::kill" 2>/dev/null || true
     sleep 1
 }
@@ -36,25 +36,18 @@ start_cluster() {
     local svrs
     svrs="$(get_servers "$np")"
     kill_cluster
-    rm -rf /tmp/madkv-p2-backer && mkdir -p /tmp/madkv-p2-backer
-    remote "rm -rf /tmp/madkv-p2-backer && mkdir -p /tmp/madkv-p2-backer" 2>/dev/null
-    log "Starting ${np}-partition cluster"
-    cd "$MADKV"
-    ./kvstore/bin/kvmanager "0.0.0.0:3666" "$svrs" >/tmp/madkv-p2-backer/mgr.log 2>&1 &
+    log "Starting ${np}-partition cluster (node1=server)"
+    remote "cd $MADKV && rm -rf /tmp/madkv-p2-backer && mkdir -p /tmp/madkv-p2-backer"
+    remote "nohup $MADKV/kvstore/bin/kvmanager 0.0.0.0:3666 '$svrs' >/tmp/madkv-p2-backer/mgr.log 2>&1 & disown; sleep 1"
     case "$np" in
         1)
-            ./kvstore/bin/kvserver 0 "$MANAGER" 3777 "${BACKER}.s0" >/tmp/madkv-p2-backer/s0.log 2>&1 &
+            remote "nohup $MADKV/kvstore/bin/kvserver 0 $MANAGER 3777 ${BACKER}.s0 >/tmp/madkv-p2-backer/s0.log 2>&1 & disown; sleep 1"
             ;;
         3)
-            ./kvstore/bin/kvserver 0 "$MANAGER" 3777 "${BACKER}.s0" >/tmp/madkv-p2-backer/s0.log 2>&1 &
-            ./kvstore/bin/kvserver 1 "$MANAGER" 3778 "${BACKER}.s1" >/tmp/madkv-p2-backer/s1.log 2>&1 &
-            remote "nohup $MADKV/kvstore/bin/kvserver 2 $MANAGER 3777 ${BACKER}.s2 >/tmp/madkv-p2-backer/s2.log 2>&1 & disown; sleep 1"
+            remote "nohup $MADKV/kvstore/bin/kvserver 0 $MANAGER 3777 ${BACKER}.s0 >/tmp/madkv-p2-backer/s0.log 2>&1 & nohup $MADKV/kvstore/bin/kvserver 1 $MANAGER 3778 ${BACKER}.s1 >/tmp/madkv-p2-backer/s1.log 2>&1 & nohup $MADKV/kvstore/bin/kvserver 2 $MANAGER 3779 ${BACKER}.s2 >/tmp/madkv-p2-backer/s2.log 2>&1 & disown -a; sleep 1"
             ;;
         5)
-            ./kvstore/bin/kvserver 0 "$MANAGER" 3777 "${BACKER}.s0" >/tmp/madkv-p2-backer/s0.log 2>&1 &
-            ./kvstore/bin/kvserver 1 "$MANAGER" 3778 "${BACKER}.s1" >/tmp/madkv-p2-backer/s1.log 2>&1 &
-            ./kvstore/bin/kvserver 2 "$MANAGER" 3779 "${BACKER}.s2" >/tmp/madkv-p2-backer/s2.log 2>&1 &
-            remote "nohup $MADKV/kvstore/bin/kvserver 3 $MANAGER 3777 ${BACKER}.s3 >/tmp/madkv-p2-backer/s3.log 2>&1 & nohup $MADKV/kvstore/bin/kvserver 4 $MANAGER 3778 ${BACKER}.s4 >/tmp/madkv-p2-backer/s4.log 2>&1 & disown -a; sleep 1"
+            remote "nohup $MADKV/kvstore/bin/kvserver 0 $MANAGER 3777 ${BACKER}.s0 >/tmp/madkv-p2-backer/s0.log 2>&1 & nohup $MADKV/kvstore/bin/kvserver 1 $MANAGER 3778 ${BACKER}.s1 >/tmp/madkv-p2-backer/s1.log 2>&1 & nohup $MADKV/kvstore/bin/kvserver 2 $MANAGER 3779 ${BACKER}.s2 >/tmp/madkv-p2-backer/s2.log 2>&1 & nohup $MADKV/kvstore/bin/kvserver 3 $MANAGER 3780 ${BACKER}.s3 >/tmp/madkv-p2-backer/s3.log 2>&1 & nohup $MADKV/kvstore/bin/kvserver 4 $MANAGER 3781 ${BACKER}.s4 >/tmp/madkv-p2-backer/s4.log 2>&1 & disown -a; sleep 1"
             ;;
     esac
     sleep 5
