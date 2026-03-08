@@ -1,5 +1,6 @@
 #include <grpcpp/grpcpp.h>
 
+#include <condition_variable>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -57,6 +58,8 @@ static void Log(const std::string& msg) {
 // WAL entry: [op:1][klen:4][vlen:4][key_bytes][value_bytes]
 enum WalOp : uint8_t { WAL_SET = 0, WAL_DEL = 1 };
 static constexpr size_t WAL_HEADER_SIZE = 1 + 4 + 4;
+static constexpr size_t BATCH_SIZE = 64;
+static constexpr int FLUSH_INTERVAL_MS = 5;
 
 class WriteAheadLog {
  public:
@@ -65,29 +68,37 @@ class WriteAheadLog {
     if (fd_ < 0) {
       throw std::runtime_error("failed to open WAL: " + path);
     }
+    flusher_ = std::thread(&WriteAheadLog::FlushLoop, this);
   }
 
   ~WriteAheadLog() {
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      shutdown_ = true;
+      cv_.notify_all();
+    }
+    if (flusher_.joinable()) flusher_.join();
     if (fd_ >= 0) ::close(fd_);
   }
 
   void append(WalOp op, const std::string& key, const std::string& value) {
     uint32_t klen = static_cast<uint32_t>(key.size());
     uint32_t vlen = static_cast<uint32_t>(value.size());
+    std::vector<char> entry(WAL_HEADER_SIZE + klen + vlen);
+    entry[0] = static_cast<char>(op);
+    std::memcpy(&entry[1], &klen, 4);
+    std::memcpy(&entry[5], &vlen, 4);
+    std::memcpy(&entry[WAL_HEADER_SIZE], key.data(), klen);
+    std::memcpy(&entry[WAL_HEADER_SIZE + klen], value.data(), vlen);
 
-    buf_.clear();
-    buf_.resize(WAL_HEADER_SIZE + klen + vlen);
-    buf_[0] = static_cast<char>(op);
-    std::memcpy(&buf_[1], &klen, 4);
-    std::memcpy(&buf_[5], &vlen, 4);
-    std::memcpy(&buf_[WAL_HEADER_SIZE], key.data(), klen);
-    std::memcpy(&buf_[WAL_HEADER_SIZE + klen], value.data(), vlen);
-
-    ssize_t w = ::write(fd_, buf_.data(), buf_.size());
-    if (w != static_cast<ssize_t>(buf_.size())) {
-      throw std::runtime_error("WAL write failed");
+    std::unique_lock<std::mutex> lock(mu_);
+    buffer_.insert(buffer_.end(), entry.begin(), entry.end());
+    ++entry_count_;
+    if (entry_count_ >= BATCH_SIZE) {
+      DoFlush(lock);
+    } else {
+      cv_.wait(lock, [this] { return buffer_.empty() || shutdown_; });
     }
-    ::fdatasync(fd_);
   }
 
   static std::map<std::string, std::string> replay(const std::string& path) {
@@ -136,9 +147,43 @@ class WriteAheadLog {
   }
 
  private:
+  void DoFlush(std::unique_lock<std::mutex>& lock) {
+    if (buffer_.empty()) return;
+    std::vector<char> to_write = std::move(buffer_);
+    buffer_.clear();
+    entry_count_ = 0;
+    lock.unlock();
+    ssize_t w = ::write(fd_, to_write.data(), to_write.size());
+    if (w != static_cast<ssize_t>(to_write.size())) {
+      throw std::runtime_error("WAL write failed");
+    }
+#ifdef __APPLE__
+    ::fsync(fd_);
+#else
+    ::fdatasync(fd_);
+#endif
+    lock.lock();
+    cv_.notify_all();
+  }
+
+  void FlushLoop() {
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(FLUSH_INTERVAL_MS));
+      std::unique_lock<std::mutex> lock(mu_);
+      if (shutdown_ && buffer_.empty()) break;
+      if (!buffer_.empty()) DoFlush(lock);
+    }
+  }
+
+ private:
   std::string path_;
   int fd_ = -1;
-  std::vector<char> buf_;
+  std::vector<char> buffer_;
+  size_t entry_count_ = 0;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::thread flusher_;
+  bool shutdown_ = false;
 };
 
 class KVStoreServiceImpl final : public KVStore::Service {
