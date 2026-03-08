@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -72,7 +73,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& key = request->key();
     const std::string& value = request->value();
 
-    std::lock_guard<std::mutex> g(mu_);
+    std::unique_lock<std::shared_mutex> g(mu_);
     std::string old_value;
     rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
     bool found = get_s.ok();
@@ -99,7 +100,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& key = request->key();
     const std::string& value = request->value();
 
-    std::lock_guard<std::mutex> g(mu_);
+    std::unique_lock<std::shared_mutex> g(mu_);
     std::string old_value;
     rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
     if (get_s.ok()) {
@@ -126,7 +127,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
              GetResponse* response) override {
     (void)context;
     const std::string& key = request->key();
-    std::lock_guard<std::mutex> g(mu_);
+    std::shared_lock<std::shared_mutex> g(mu_);
     std::string value;
     rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &value);
     if (get_s.ok()) {
@@ -147,7 +148,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& start_key = request->start_key();
     const std::string& end_key = request->end_key();
 
-    std::lock_guard<std::mutex> g(mu_);
+    std::shared_lock<std::shared_mutex> g(mu_);
     auto it =
         std::unique_ptr<rocksdb::Iterator>(db_->NewIterator(rocksdb::ReadOptions()));
     for (it->Seek(start_key); it->Valid() && it->key().ToString() <= end_key;
@@ -169,7 +170,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
     (void)context;
     const std::string& key = request->key();
 
-    std::lock_guard<std::mutex> g(mu_);
+    std::unique_lock<std::shared_mutex> g(mu_);
     std::string old_value;
     rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
     if (!get_s.ok() && !get_s.IsNotFound()) {
@@ -193,7 +194,7 @@ class KVStoreServiceImpl final : public KVStore::Service {
  private:
   std::string db_path_;
   rocksdb::DB* db_ = nullptr;
-  mutable std::mutex mu_;
+  mutable std::shared_mutex mu_;
 };
 
 static bool RegisterToManager(uint32_t sid, const std::string& manager_addr,

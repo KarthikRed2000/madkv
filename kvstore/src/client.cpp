@@ -100,7 +100,7 @@ class DirectClient {
   void DoWithRetry(RpcFn rpc) {
     while (true) {
       ClientContext ctx;
-      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(300));
       Status s = rpc(ctx);
       if (s.ok()) {
         return;
@@ -233,7 +233,7 @@ class PartitionedClient {
   void DoOnPartitionWithRetry(size_t partition, RpcFn rpc) {
     while (true) {
       ClientContext ctx;
-      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+      ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(300));
       Status s = rpc(stubs_.at(partition).get(), ctx);
       if (s.ok()) {
         return;
