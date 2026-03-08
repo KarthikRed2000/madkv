@@ -1,19 +1,21 @@
 #include <grpcpp/grpcpp.h>
-#include <rocksdb/db.h>
-#include <rocksdb/options.h>
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
-#include <mutex>
 #include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
+#include <vector>
 
 #include "cluster.grpc.pb.h"
 #include "kvstore.grpc.pb.h"
@@ -52,20 +54,104 @@ static void Log(const std::string& msg) {
   std::cerr << "[" << NowTs() << "] [server] " << msg << std::endl;
 }
 
+// WAL entry: [op:1][klen:4][vlen:4][key_bytes][value_bytes]
+enum WalOp : uint8_t { WAL_SET = 0, WAL_DEL = 1 };
+static constexpr size_t WAL_HEADER_SIZE = 1 + 4 + 4;
+
+class WriteAheadLog {
+ public:
+  explicit WriteAheadLog(const std::string& path) : path_(path) {
+    fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd_ < 0) {
+      throw std::runtime_error("failed to open WAL: " + path);
+    }
+  }
+
+  ~WriteAheadLog() {
+    if (fd_ >= 0) ::close(fd_);
+  }
+
+  void append(WalOp op, const std::string& key, const std::string& value) {
+    uint32_t klen = static_cast<uint32_t>(key.size());
+    uint32_t vlen = static_cast<uint32_t>(value.size());
+
+    buf_.clear();
+    buf_.resize(WAL_HEADER_SIZE + klen + vlen);
+    buf_[0] = static_cast<char>(op);
+    std::memcpy(&buf_[1], &klen, 4);
+    std::memcpy(&buf_[5], &vlen, 4);
+    std::memcpy(&buf_[WAL_HEADER_SIZE], key.data(), klen);
+    std::memcpy(&buf_[WAL_HEADER_SIZE + klen], value.data(), vlen);
+
+    ssize_t w = ::write(fd_, buf_.data(), buf_.size());
+    if (w != static_cast<ssize_t>(buf_.size())) {
+      throw std::runtime_error("WAL write failed");
+    }
+    ::fdatasync(fd_);
+  }
+
+  static std::map<std::string, std::string> replay(const std::string& path) {
+    std::map<std::string, std::string> state;
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return state;
+
+    off_t file_size = ::lseek(fd, 0, SEEK_END);
+    if (file_size <= 0) { ::close(fd); return state; }
+    ::lseek(fd, 0, SEEK_SET);
+
+    std::vector<char> data(static_cast<size_t>(file_size));
+    ssize_t rd = ::read(fd, data.data(), data.size());
+    ::close(fd);
+    if (rd <= 0) return state;
+
+    size_t total = static_cast<size_t>(rd);
+    size_t pos = 0;
+    size_t count = 0;
+
+    while (pos + WAL_HEADER_SIZE <= total) {
+      uint8_t op = static_cast<uint8_t>(data[pos]);
+      uint32_t klen, vlen;
+      std::memcpy(&klen, &data[pos + 1], 4);
+      std::memcpy(&vlen, &data[pos + 5], 4);
+
+      size_t entry_size = WAL_HEADER_SIZE + klen + vlen;
+      if (pos + entry_size > total) break;
+
+      std::string key(&data[pos + WAL_HEADER_SIZE], klen);
+      pos += WAL_HEADER_SIZE + klen;
+      std::string value(&data[pos], vlen);
+      pos += vlen;
+      count++;
+
+      if (op == WAL_SET) {
+        state[key] = std::move(value);
+      } else if (op == WAL_DEL) {
+        state.erase(key);
+      }
+    }
+
+    Log("WAL replay: " + std::to_string(count) + " entries -> " +
+        std::to_string(state.size()) + " keys");
+    return state;
+  }
+
+ private:
+  std::string path_;
+  int fd_ = -1;
+  std::vector<char> buf_;
+};
+
 class KVStoreServiceImpl final : public KVStore::Service {
  public:
   explicit KVStoreServiceImpl(const std::string& db_path) : db_path_(db_path) {
-    rocksdb::Options options;
-    options.create_if_missing = true;
-    rocksdb::Status s = rocksdb::DB::Open(options, db_path, &db_);
-    if (!s.ok()) {
-      throw std::runtime_error("failed to open RocksDB at " + db_path + ": " +
-                               s.ToString());
-    }
-    Log("rocksdb opened path=" + db_path_);
-  }
+    std::filesystem::create_directories(db_path);
+    std::string wal_path = db_path + "/wal.log";
 
-  ~KVStoreServiceImpl() override { delete db_; }
+    state_ = WriteAheadLog::replay(wal_path);
+    wal_ = std::make_unique<WriteAheadLog>(wal_path);
+    Log("state machine ready path=" + db_path_ +
+        " keys=" + std::to_string(state_.size()));
+  }
 
   Status Put(ServerContext* context, const PutRequest* request,
              PutResponse* response) override {
@@ -74,21 +160,9 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& value = request->value();
 
     std::unique_lock<std::shared_mutex> g(mu_);
-    std::string old_value;
-    rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
-    bool found = get_s.ok();
-    if (!found && !get_s.IsNotFound()) {
-      Log("Put read error key=" + key + " status=" + get_s.ToString());
-      return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
-    }
-
-    rocksdb::WriteOptions write_opts;
-    write_opts.sync = true;
-    rocksdb::Status put_s = db_->Put(write_opts, key, value);
-    if (!put_s.ok()) {
-      Log("Put write error key=" + key + " status=" + put_s.ToString());
-      return Status(grpc::StatusCode::INTERNAL, put_s.ToString());
-    }
+    bool found = state_.count(key) > 0;
+    wal_->append(WAL_SET, key, value);
+    state_[key] = value;
 
     response->set_found(found);
     return Status::OK;
@@ -101,25 +175,16 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& value = request->value();
 
     std::unique_lock<std::shared_mutex> g(mu_);
-    std::string old_value;
-    rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
-    if (get_s.ok()) {
+    auto it = state_.find(key);
+    if (it != state_.end()) {
       response->set_found(true);
-      response->set_old_value(old_value);
-    } else if (get_s.IsNotFound()) {
-      response->set_found(false);
+      response->set_old_value(it->second);
     } else {
-      Log("Swap read error key=" + key + " status=" + get_s.ToString());
-      return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
+      response->set_found(false);
     }
+    wal_->append(WAL_SET, key, value);
+    state_[key] = value;
 
-    rocksdb::WriteOptions write_opts;
-    write_opts.sync = true;
-    rocksdb::Status put_s = db_->Put(write_opts, key, value);
-    if (!put_s.ok()) {
-      Log("Swap write error key=" + key + " status=" + put_s.ToString());
-      return Status(grpc::StatusCode::INTERNAL, put_s.ToString());
-    }
     return Status::OK;
   }
 
@@ -127,17 +192,14 @@ class KVStoreServiceImpl final : public KVStore::Service {
              GetResponse* response) override {
     (void)context;
     const std::string& key = request->key();
+
     std::shared_lock<std::shared_mutex> g(mu_);
-    std::string value;
-    rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &value);
-    if (get_s.ok()) {
+    auto it = state_.find(key);
+    if (it != state_.end()) {
       response->set_found(true);
-      response->set_value(value);
-    } else if (get_s.IsNotFound()) {
-      response->set_found(false);
+      response->set_value(it->second);
     } else {
-      Log("Get read error key=" + key + " status=" + get_s.ToString());
-      return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
+      response->set_found(false);
     }
     return Status::OK;
   }
@@ -149,18 +211,11 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& end_key = request->end_key();
 
     std::shared_lock<std::shared_mutex> g(mu_);
-    auto it =
-        std::unique_ptr<rocksdb::Iterator>(db_->NewIterator(rocksdb::ReadOptions()));
-    for (it->Seek(start_key); it->Valid() && it->key().ToString() <= end_key;
-         it->Next()) {
+    for (auto it = state_.lower_bound(start_key);
+         it != state_.end() && it->first <= end_key; ++it) {
       auto* entry = response->add_entries();
-      entry->set_key(it->key().ToString());
-      entry->set_value(it->value().ToString());
-    }
-    if (!it->status().ok()) {
-      Log("Scan iterator error start=" + start_key + " end=" + end_key +
-          " status=" + it->status().ToString());
-      return Status(grpc::StatusCode::INTERNAL, it->status().ToString());
+      entry->set_key(it->first);
+      entry->set_value(it->second);
     }
     return Status::OK;
   }
@@ -171,21 +226,11 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& key = request->key();
 
     std::unique_lock<std::shared_mutex> g(mu_);
-    std::string old_value;
-    rocksdb::Status get_s = db_->Get(rocksdb::ReadOptions(), key, &old_value);
-    if (!get_s.ok() && !get_s.IsNotFound()) {
-      Log("Delete read error key=" + key + " status=" + get_s.ToString());
-      return Status(grpc::StatusCode::INTERNAL, get_s.ToString());
-    }
-    bool found = get_s.ok();
+    auto it = state_.find(key);
+    bool found = (it != state_.end());
     if (found) {
-      rocksdb::WriteOptions write_opts;
-      write_opts.sync = true;
-      rocksdb::Status del_s = db_->Delete(write_opts, key);
-      if (!del_s.ok()) {
-        Log("Delete write error key=" + key + " status=" + del_s.ToString());
-        return Status(grpc::StatusCode::INTERNAL, del_s.ToString());
-      }
+      wal_->append(WAL_DEL, key, "");
+      state_.erase(it);
     }
     response->set_found(found);
     return Status::OK;
@@ -193,7 +238,8 @@ class KVStoreServiceImpl final : public KVStore::Service {
 
  private:
   std::string db_path_;
-  rocksdb::DB* db_ = nullptr;
+  std::map<std::string, std::string> state_;
+  std::unique_ptr<WriteAheadLog> wal_;
   mutable std::shared_mutex mu_;
 };
 
@@ -257,7 +303,6 @@ static void RunServer(const std::string& listen_addr, const std::string& db_path
 
 int main(int argc, char** argv) {
   try {
-    // Project 1 mode: kvserver <listen_addr> [backer_path]
     if (argc == 2 || argc == 3) {
       std::string listen_addr = argv[1];
       std::string backer_path = (argc == 3) ? argv[2] : "./backer.default";
@@ -266,7 +311,6 @@ int main(int argc, char** argv) {
       return 0;
     }
 
-    // Project 2 mode: kvserver <id> <manager_addr> <api_port> <backer_path>
     if (argc == 5) {
       uint32_t sid = static_cast<uint32_t>(std::stoul(argv[1]));
       std::string manager_addr = argv[2];
