@@ -58,8 +58,8 @@ static void Log(const std::string& msg) {
 // WAL entry: [op:1][klen:4][vlen:4][key_bytes][value_bytes]
 enum WalOp : uint8_t { WAL_SET = 0, WAL_DEL = 1 };
 static constexpr size_t WAL_HEADER_SIZE = 1 + 4 + 4;
-static constexpr size_t BATCH_SIZE = 64;
-static constexpr int FLUSH_INTERVAL_MS = 5;
+static constexpr size_t BATCH_SIZE = 512;
+static constexpr int FLUSH_INTERVAL_MS = 20;
 
 class WriteAheadLog {
  public:
@@ -204,11 +204,16 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& key = request->key();
     const std::string& value = request->value();
 
-    std::unique_lock<std::shared_mutex> g(mu_);
-    bool found = state_.count(key) > 0;
+    bool found;
+    {
+      std::shared_lock<std::shared_mutex> g(mu_);
+      found = state_.count(key) > 0;
+    }
     wal_->append(WAL_SET, key, value);
-    state_[key] = value;
-
+    {
+      std::unique_lock<std::shared_mutex> g(mu_);
+      state_[key] = value;
+    }
     response->set_found(found);
     return Status::OK;
   }
@@ -219,17 +224,22 @@ class KVStoreServiceImpl final : public KVStore::Service {
     const std::string& key = request->key();
     const std::string& value = request->value();
 
-    std::unique_lock<std::shared_mutex> g(mu_);
-    auto it = state_.find(key);
-    if (it != state_.end()) {
-      response->set_found(true);
-      response->set_old_value(it->second);
-    } else {
-      response->set_found(false);
+    std::string old_value;
+    bool found;
+    {
+      std::unique_lock<std::shared_mutex> g(mu_);
+      auto it = state_.find(key);
+      if (it != state_.end()) {
+        found = true;
+        old_value = it->second;
+      } else {
+        found = false;
+      }
+      wal_->append(WAL_SET, key, value);
+      state_[key] = value;
     }
-    wal_->append(WAL_SET, key, value);
-    state_[key] = value;
-
+    response->set_found(found);
+    if (found) response->set_old_value(old_value);
     return Status::OK;
   }
 
