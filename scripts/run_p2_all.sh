@@ -107,6 +107,9 @@ log "P2 Full Test Suite - node0=$NODE0_IP node1=$NODE1_IP"
 rm -rf /tmp/madkv-p2/fuzz /tmp/madkv-p2/bench
 mkdir -p /tmp/madkv-p2/fuzz /tmp/madkv-p2/bench
 
+log "==== Running bench a======"
+run_bench 10 a 1
+
 log "=== FUZZ TESTS ==="
 run_fuzz 3 no
 run_fuzz 3 yes
