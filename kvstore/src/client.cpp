@@ -241,7 +241,14 @@ class PartitionedClient {
       std::this_thread::sleep_for(std::chrono::milliseconds(300));
       if (s.error_code() == grpc::StatusCode::UNAVAILABLE) {
         RefreshClusterWithRetry();
-        partition = std::min(partition, stubs_.size() - 1);
+        // RefreshClusterWithRetry() only returns once stubs_ is non-empty
+        // (it loops until res.partitions_size() > 0), so stubs_.size() >= 1
+        // here and the subtraction is safe.  Clamp rather than re-hash so
+        // that callers that already selected a partition keep targeting the
+        // same logical shard if the cluster size hasn't changed.
+        if (!stubs_.empty()) {
+          partition = std::min(partition, stubs_.size() - 1);
+        }
       }
     }
   }
