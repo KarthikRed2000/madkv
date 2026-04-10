@@ -43,7 +43,7 @@
 // KV command serialisation
 // ─────────────────────────────────────────────────────────────────────────────
 
-enum class KVCmdType : uint8_t { PUT = 0, SWAP = 1, DEL = 2 };
+enum class KVCmdType : uint8_t { PUT = 0, SWAP = 1, DEL = 2, NOOP = 3 };
 
 struct KVCmd {
   KVCmdType   type  = KVCmdType::PUT;
@@ -135,10 +135,11 @@ class RaftNode {
     }
 
     std::filesystem::create_directories(backer_path_);
-    LoadState();
 
-    // Sentinel at index 0 (Raft is 1-indexed)
-    if (log_.empty()) log_.push_back({0, ""});
+    // Sentinel at index 0 — must be present before LoadState appends disk entries,
+    // otherwise all indices are off by 1 after a restart.
+    log_.push_back({0, ""});
+    LoadState();
 
     // Replay committed entries to rebuild volatile state
     for (int64_t i = 1; i <= commit_index_ && i < (int64_t)log_.size(); i++) {
@@ -195,8 +196,11 @@ class RaftNode {
       AppendLogEntryLocked(entry);
       my_index = LastLogIndex();
       pending_[my_index] = std::move(promise);
-      // Update leader's own match index for commit counting
+      // Update leader's own match index for commit counting.
+      // Also advance commit index here so RF=1 clusters commit immediately
+      // (ReplicateToPeer is never called when there are no peers).
       match_index_[my_id_] = my_index;
+      AdvanceCommitIndex();
     }
 
     // Wake replication loop to send immediately
@@ -435,6 +439,15 @@ class RaftNode {
     next_index_.assign(rf_,  LastLogIndex() + 1);
     match_index_.assign(rf_, 0);
     match_index_[my_id_] = LastLogIndex();
+
+    // Raft §8: append a no-op entry in the new term so that entries from
+    // previous terms get committed as soon as a majority replicates this entry.
+    KVCmd noop{KVCmdType::NOOP, "", ""};
+    RaftEntry noop_entry{current_term_, noop.Serialize()};
+    AppendLogEntryLocked(noop_entry);
+    match_index_[my_id_] = LastLogIndex();
+    AdvanceCommitIndex();  // For RF=1, the no-op commits immediately
+
     RaftLog("became LEADER");
     repl_cv_.notify_all();
   }

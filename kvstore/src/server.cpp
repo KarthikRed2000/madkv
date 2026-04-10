@@ -328,6 +328,8 @@ class P3KVStoreImpl final : public KVStore::Service {
     std::unique_lock<std::shared_mutex> g(mu_);
     KVResult result;
     switch (cmd.type) {
+      case KVCmdType::NOOP:
+        break;  // leader heartbeat entry — no state change
       case KVCmdType::PUT: {
         result.found = state_.count(cmd.key) > 0;
         if (result.found) result.old_value = state_.at(cmd.key);
