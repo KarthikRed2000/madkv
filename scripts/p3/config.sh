@@ -29,58 +29,58 @@
 
 CLOUDLAB_USER="jann2000"
 
-# ── SSH targets (user@hostname) ───────────────────────────────────────────────
+# ── SSH targets — use internal experiment hostnames (node0..node21)
+#    These resolve via /etc/hosts on every experiment node (10.10.1.1..22).
+#    From outside the experiment (e.g. your laptop) use pc297.emulab.net etc.
 NODE_HOSTS=(
-  "${CLOUDLAB_USER}@pc297.emulab.net"   # node0  – orchestrator / client
-  "${CLOUDLAB_USER}@pc550.emulab.net"   # node1  – manager
-  "${CLOUDLAB_USER}@pc315.emulab.net"   # node2  – s0.0
-  "${CLOUDLAB_USER}@pc431.emulab.net"   # node3  – s0.1
-  "${CLOUDLAB_USER}@pc499.emulab.net"   # node4  – s0.2
-  "${CLOUDLAB_USER}@pc308.emulab.net"   # node5  – s0.3
-  "${CLOUDLAB_USER}@pc299.emulab.net"   # node6  – s0.4
-  "${CLOUDLAB_USER}@pc439.emulab.net"   # node7  – s1.0
-  "${CLOUDLAB_USER}@pc304.emulab.net"   # node8  – s1.1
-  "${CLOUDLAB_USER}@pc552.emulab.net"   # node9  – s1.2
-  "${CLOUDLAB_USER}@pc253.emulab.net"   # node10 – s1.3
-  "${CLOUDLAB_USER}@pc497.emulab.net"   # node11 – s1.4
-  "${CLOUDLAB_USER}@pc513.emulab.net"   # node12 – client 0
-  "${CLOUDLAB_USER}@pc309.emulab.net"   # node13 – client 1
-  "${CLOUDLAB_USER}@pc320.emulab.net"   # node14 – client 2
-  "${CLOUDLAB_USER}@pc283.emulab.net"   # node15 – client 3
-  "${CLOUDLAB_USER}@pc525.emulab.net"   # node16 – client 4
-  "${CLOUDLAB_USER}@pc433.emulab.net"   # node17 – client 5
-  "${CLOUDLAB_USER}@pc430.emulab.net"   # node18 – client 6
-  "${CLOUDLAB_USER}@pc306.emulab.net"   # node19 – client 7
-  "${CLOUDLAB_USER}@pc288.emulab.net"   # node20 – client 8
-  "${CLOUDLAB_USER}@pc438.emulab.net"   # node21 – client 9
+  "node0"   # node0  – orchestrator / client
+  "node1"   # node1  – manager
+  "node2"   # node2  – s0.0
+  "node3"   # node3  – s0.1
+  "node4"   # node4  – s0.2
+  "node5"   # node5  – s0.3
+  "node6"   # node6  – s0.4
+  "node7"   # node7  – s1.0
+  "node8"   # node8  – s1.1
+  "node9"   # node9  – s1.2
+  "node10"  # node10 – s1.3
+  "node11"  # node11 – s1.4
+  "node12"  # node12 – client 0
+  "node13"  # node13 – client 1
+  "node14"  # node14 – client 2
+  "node15"  # node15 – client 3
+  "node16"  # node16 – client 4
+  "node17"  # node17 – client 5
+  "node18"  # node18 – client 6
+  "node19"  # node19 – client 7
+  "node20"  # node20 – client 8
+  "node21"  # node21 – client 9
 )
 
-# ── Network addresses used for gRPC (hostname without user@) ─────────────────
-# Within an Emulab experiment these hostnames resolve correctly on all nodes.
-# If you prefer private experiment IPs, run discover_ips.sh and paste them here.
+# ── Network addresses for gRPC — internal experiment IPs (10.10.1.x)
 NODE_ADDRS=(
-  "pc297.emulab.net"   # node0  – orchestrator
-  "pc550.emulab.net"   # node1  – manager
-  "pc315.emulab.net"   # node2  – s0.0
-  "pc431.emulab.net"   # node3  – s0.1
-  "pc499.emulab.net"   # node4  – s0.2
-  "pc308.emulab.net"   # node5  – s0.3
-  "pc299.emulab.net"   # node6  – s0.4
-  "pc439.emulab.net"   # node7  – s1.0
-  "pc304.emulab.net"   # node8  – s1.1
-  "pc552.emulab.net"   # node9  – s1.2
-  "pc253.emulab.net"   # node10 – s1.3
-  "pc497.emulab.net"   # node11 – s1.4
-  "pc513.emulab.net"   # node12 – client 0
-  "pc309.emulab.net"   # node13 – client 1
-  "pc320.emulab.net"   # node14 – client 2
-  "pc283.emulab.net"   # node15 – client 3
-  "pc525.emulab.net"   # node16 – client 4
-  "pc433.emulab.net"   # node17 – client 5
-  "pc430.emulab.net"   # node18 – client 6
-  "pc306.emulab.net"   # node19 – client 7
-  "pc288.emulab.net"   # node20 – client 8
-  "pc438.emulab.net"   # node21 – client 9
+  "10.10.1.1"   # node0  – orchestrator
+  "10.10.1.2"   # node1  – manager
+  "10.10.1.3"   # node2  – s0.0
+  "10.10.1.4"   # node3  – s0.1
+  "10.10.1.5"   # node4  – s0.2
+  "10.10.1.6"   # node5  – s0.3
+  "10.10.1.7"   # node6  – s0.4
+  "10.10.1.8"   # node7  – s1.0
+  "10.10.1.9"   # node8  – s1.1
+  "10.10.1.10"  # node9  – s1.2
+  "10.10.1.11"  # node10 – s1.3
+  "10.10.1.12"  # node11 – s1.4
+  "10.10.1.13"  # node12 – client 0
+  "10.10.1.14"  # node13 – client 1
+  "10.10.1.15"  # node14 – client 2
+  "10.10.1.16"  # node15 – client 3
+  "10.10.1.17"  # node16 – client 4
+  "10.10.1.18"  # node17 – client 5
+  "10.10.1.19"  # node18 – client 6
+  "10.10.1.20"  # node19 – client 7
+  "10.10.1.21"  # node20 – client 8
+  "10.10.1.22"  # node21 – client 9
 )
 
 # Backward-compat alias used by older code that referenced NODE_IPS
