@@ -37,21 +37,17 @@ message(STATUS "Using Protobuf ${PROTOBUF_VERSION}")
 # Proto files
 set(KVSTORE_PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/proto/kvstore.proto)
 set(CLUSTER_PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/proto/cluster.proto)
-
-# Generate gRPC and protobuf files
-set(KVSTORE_PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/kvstore.pb.cc")
-set(KVSTORE_PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/kvstore.pb.h")
-set(KVSTORE_GRPC_SRCS "${CMAKE_CURRENT_BINARY_DIR}/kvstore.grpc.pb.cc")
-set(KVSTORE_GRPC_HDRS "${CMAKE_CURRENT_BINARY_DIR}/kvstore.grpc.pb.h")
-
-set(CLUSTER_PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/cluster.pb.cc")
-set(CLUSTER_PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/cluster.pb.h")
-set(CLUSTER_GRPC_SRCS "${CMAKE_CURRENT_BINARY_DIR}/cluster.grpc.pb.cc")
-set(CLUSTER_GRPC_HDRS "${CMAKE_CURRENT_BINARY_DIR}/cluster.grpc.pb.h")
+set(RAFT_PROTO_FILE    ${CMAKE_CURRENT_SOURCE_DIR}/proto/raft.proto)
 
 # Find protoc and grpc_cpp_plugin executables
 find_program(PROTOC protoc REQUIRED)
 find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+
+# ── kvstore proto ─────────────────────────────────────────────────────────────
+set(KVSTORE_PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/kvstore.pb.cc")
+set(KVSTORE_PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/kvstore.pb.h")
+set(KVSTORE_GRPC_SRCS  "${CMAKE_CURRENT_BINARY_DIR}/kvstore.grpc.pb.cc")
+set(KVSTORE_GRPC_HDRS  "${CMAKE_CURRENT_BINARY_DIR}/kvstore.grpc.pb.h")
 
 add_custom_command(
     OUTPUT ${KVSTORE_PROTO_SRCS} ${KVSTORE_PROTO_HDRS} ${KVSTORE_GRPC_SRCS} ${KVSTORE_GRPC_HDRS}
@@ -65,6 +61,12 @@ add_custom_command(
     COMMENT "Generating kvstore proto/grpc files"
 )
 
+# ── cluster proto ─────────────────────────────────────────────────────────────
+set(CLUSTER_PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/cluster.pb.cc")
+set(CLUSTER_PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/cluster.pb.h")
+set(CLUSTER_GRPC_SRCS  "${CMAKE_CURRENT_BINARY_DIR}/cluster.grpc.pb.cc")
+set(CLUSTER_GRPC_HDRS  "${CMAKE_CURRENT_BINARY_DIR}/cluster.grpc.pb.h")
+
 add_custom_command(
     OUTPUT ${CLUSTER_PROTO_SRCS} ${CLUSTER_PROTO_HDRS} ${CLUSTER_GRPC_SRCS} ${CLUSTER_GRPC_HDRS}
     COMMAND ${PROTOC}
@@ -77,106 +79,94 @@ add_custom_command(
     COMMENT "Generating cluster proto/grpc files"
 )
 
-# Common library with generated protobuf code
-add_library(kvstore_proto
-    ${KVSTORE_PROTO_SRCS}
-    ${KVSTORE_GRPC_SRCS}
+# ── raft proto (new for P3) ───────────────────────────────────────────────────
+set(RAFT_PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/raft.pb.cc")
+set(RAFT_PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/raft.pb.h")
+set(RAFT_GRPC_SRCS  "${CMAKE_CURRENT_BINARY_DIR}/raft.grpc.pb.cc")
+set(RAFT_GRPC_HDRS  "${CMAKE_CURRENT_BINARY_DIR}/raft.grpc.pb.h")
+
+add_custom_command(
+    OUTPUT ${RAFT_PROTO_SRCS} ${RAFT_PROTO_HDRS} ${RAFT_GRPC_SRCS} ${RAFT_GRPC_HDRS}
+    COMMAND ${PROTOC}
+    ARGS --grpc_out="${CMAKE_CURRENT_BINARY_DIR}"
+         --cpp_out="${CMAKE_CURRENT_BINARY_DIR}"
+         -I="${CMAKE_CURRENT_SOURCE_DIR}/proto"
+         --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
+         ${RAFT_PROTO_FILE}
+    DEPENDS ${RAFT_PROTO_FILE}
+    COMMENT "Generating raft proto/grpc files"
 )
 
-add_library(cluster_proto
-    ${CLUSTER_PROTO_SRCS}
-    ${CLUSTER_GRPC_SRCS}
-)
+# ── Proto libraries ───────────────────────────────────────────────────────────
+add_library(kvstore_proto ${KVSTORE_PROTO_SRCS} ${KVSTORE_GRPC_SRCS})
+add_library(cluster_proto ${CLUSTER_PROTO_SRCS} ${CLUSTER_GRPC_SRCS})
+add_library(raft_proto    ${RAFT_PROTO_SRCS}    ${RAFT_GRPC_SRCS})
 
-target_link_libraries(kvstore_proto
-    ${GRPC_LIBRARIES}
-    ${PROTOBUF_LIBRARIES}
-    grpc++
-    grpc
-    protobuf
-)
+foreach(lib kvstore_proto cluster_proto raft_proto)
+    target_link_libraries(${lib}
+        ${GRPC_LIBRARIES}
+        ${PROTOBUF_LIBRARIES}
+        grpc++ grpc protobuf
+    )
+    target_include_directories(${lib} PUBLIC
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${GRPC_INCLUDE_DIRS}
+        ${PROTOBUF_INCLUDE_DIRS}
+    )
+    target_link_directories(${lib} PUBLIC
+        ${GRPC_LIBRARY_DIRS}
+        ${PROTOBUF_LIBRARY_DIRS}
+    )
+endforeach()
 
-target_link_libraries(cluster_proto
-    ${GRPC_LIBRARIES}
-    ${PROTOBUF_LIBRARIES}
-    grpc++
-    grpc
-    protobuf
-)
+# ── Server executable ─────────────────────────────────────────────────────────
+add_executable(kvserver src/server.cpp)
 
-target_include_directories(kvstore_proto PUBLIC
+target_include_directories(kvserver PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}
-    ${GRPC_INCLUDE_DIRS}
-    ${PROTOBUF_INCLUDE_DIRS}
-)
-
-target_include_directories(cluster_proto PUBLIC
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${GRPC_INCLUDE_DIRS}
-    ${PROTOBUF_INCLUDE_DIRS}
-)
-
-target_link_directories(kvstore_proto PUBLIC
-    ${GRPC_LIBRARY_DIRS}
-    ${PROTOBUF_LIBRARY_DIRS}
-)
-
-target_link_directories(cluster_proto PUBLIC
-    ${GRPC_LIBRARY_DIRS}
-    ${PROTOBUF_LIBRARY_DIRS}
-)
-
-# Server executable
-add_executable(kvserver
-    src/server.cpp
+    ${ROCKSDB_INCLUDE_DIRS}
 )
 
 target_link_libraries(kvserver
     kvstore_proto
     cluster_proto
-    grpc++
-    grpc
-    protobuf
+    raft_proto
+    grpc++ grpc protobuf
     ${ROCKSDB_LIBS}
     Threads::Threads
 )
 
-# Client executable
-add_executable(kvclient
-    src/client.cpp
+target_link_directories(kvserver PRIVATE ${ROCKSDB_LIBRARY_DIRS})
+
+# ── Client executable ─────────────────────────────────────────────────────────
+add_executable(kvclient src/client.cpp)
+
+target_include_directories(kvclient PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_link_libraries(kvclient
     kvstore_proto
     cluster_proto
-    grpc++
-    grpc
-    protobuf
+    grpc++ grpc protobuf
     Threads::Threads
 )
 
-# Manager executable
-add_executable(kvmanager
-    src/manager.cpp
+# ── Manager executable ────────────────────────────────────────────────────────
+add_executable(kvmanager src/manager.cpp)
+
+target_include_directories(kvmanager PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_link_libraries(kvmanager
     cluster_proto
-    grpc++
-    grpc
-    protobuf
+    grpc++ grpc protobuf
     Threads::Threads
 )
 
-target_include_directories(kvserver PRIVATE
-    ${ROCKSDB_INCLUDE_DIRS}
-)
-
-target_link_directories(kvserver PRIVATE
-    ${ROCKSDB_LIBRARY_DIRS}
-)
-
-# Install targets
+# ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS kvserver kvclient kvmanager
     RUNTIME DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/bin
 )
