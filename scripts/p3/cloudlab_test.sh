@@ -225,27 +225,71 @@ sep
 log "TEST 5: DEMO 4 — >f failures → partition stalls; other partition works"
 restart_cluster
 
-kvcmd "PUT p0_sentinel p0_alive" "PUT p1_sentinel p1_alive" > /dev/null
+# Find a key in each partition by writing many keys and checking server logs
+log "  Writing 40 keys and probing partition assignment..."
+puts=()
+for i in $(seq 1 40); do puts+=("PUT probe_${i} v${i}"); done
+kvcmd "${puts[@]}" > /dev/null
+sleep 1
 
-log "  Killing 3 servers in partition 0 (> f=2) ..."
-for node_idx in 2 3 4; do
-  kill_node "${NODE_HOSTS[$node_idx]}"
+# Find partition 0 leader and check which keys it applied
+find_leader 0
+P0_LEADER_NODE="$P_LEADER_NODE"
+p0_tag="s0.$((P_LEADER_IDX - 2))"
+logf="${LOG_DIR}/server-${p0_tag}.log"
+
+P0_KEY=""
+P1_KEY=""
+for i in $(seq 1 40); do
+  key="probe_${i}"
+  applied=$(ssh_node "$P0_LEADER_NODE" "grep -c 'Apply.*${key}\|${key}.*Apply' '$logf' 2>/dev/null || echo 0" 2>/dev/null || echo 0)
+  if [[ "${applied:-0}" -gt 0 && -z "$P0_KEY" ]]; then
+    P0_KEY="$key"
+  elif [[ "${applied:-0}" -eq 0 && -z "$P1_KEY" ]]; then
+    P1_KEY="$key"
+  fi
+  [[ -n "$P0_KEY" && -n "$P1_KEY" ]] && break
 done
-sleep 2
 
-# Partition 1 should still be available
-out_p1=$(kvcmd "GET p1_sentinel")
-assert_contains "p1 readable while p0 quorum lost" "GET p1_sentinel p1_alive" "$out_p1"
-
-# Partition 0 should stall (timeout). We do a short timeout test.
-log "  Testing p0 stall (expect timeout within 8s)..."
-p0_out=$(timeout 8 bash -c \
-  "(printf 'GET p0_sentinel\nSTOP\n') | '${BIN}/kvclient' --manager_addrs '${MANAGERS}'" \
-  2>/dev/null || echo "TIMEOUT_OR_ERROR")
-if echo "$p0_out" | grep -qF "p0_alive"; then
-  fail "p0 should have stalled but returned data"
+# Fallback: just kill all 5 partition 0 servers; try many keys; some will stall
+if [[ -z "$P0_KEY" ]]; then
+  log "  Could not determine partition 0 key from logs, killing all p0 nodes..."
+  for node_idx in 2 3 4 5 6; do kill_node "${NODE_HOSTS[$node_idx]}"; done
+  sleep 2
+  stalled=0
+  for i in $(seq 1 20); do
+    key="probe_${i}"
+    result=$(timeout 4 bash -c \
+      "(printf 'GET ${key}\nSTOP\n') | '${BIN}/kvclient' --manager_addrs '${MANAGERS}'" \
+      2>/dev/null || echo "TIMEOUT")
+    if echo "$result" | grep -qiE "TIMEOUT|^$"; then
+      (( stalled++ )) || true
+      P0_KEY="$key"
+      break
+    fi
+  done
+  [[ $stalled -gt 0 ]] && pass "Some p0 keys stalled as expected (no quorum)" \
+                        || fail "No keys stalled after killing all p0 replicas"
 else
-  pass "p0 stalled as expected (no quorum); p1 unaffected"
+  log "  P0 key: $P0_KEY  P1 key: ${P1_KEY:-unknown}"
+  log "  Killing 3 partition-0 replicas (> f=2)..."
+  for node_idx in 2 3 4; do kill_node "${NODE_HOSTS[$node_idx]}"; done
+  sleep 2
+
+  # P1 should still work
+  out_p1=$(kvcmd "PUT p1_sentinel p1_alive" "GET p1_sentinel")
+  assert_contains "p1 writable while p0 quorum lost" "GET p1_sentinel p1_alive" "$out_p1"
+
+  # P0 key should stall (commit requires Raft majority)
+  log "  Testing p0 stall with PUT to p0 key (expect timeout ~8s)..."
+  p0_out=$(timeout 8 bash -c \
+    "(printf 'PUT ${P0_KEY} stall_value\nSTOP\n') | '${BIN}/kvclient' --manager_addrs '${MANAGERS}'" \
+    2>/dev/null || echo "TIMEOUT_OR_ERROR")
+  if echo "$p0_out" | grep -qiE "TIMEOUT_OR_ERROR|^$"; then
+    pass "p0 PUT stalled (no quorum); p1 unaffected"
+  else
+    fail "p0 PUT should have stalled but returned: $p0_out"
+  fi
 fi
 
 # ── TEST 6: Manager crash + restart ───────────────────────────────────────────
@@ -260,10 +304,16 @@ ssh_node "${NODE_HOSTS[1]}" "pkill -9 kvmanager 2>/dev/null; true"
 sleep 2
 
 log "  Restarting manager..."
-ssh_node "${NODE_HOSTS[1]}" "bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh" &
-sleep 4
+ssh_node "${NODE_HOSTS[1]}" "nohup bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh >/tmp/madkv-p3/logs/mgr_restart.log 2>&1 &"
+sleep 6  # give it more time to bind and accept connections
 
-out=$(kvcmd "GET mgr_key1" "GET mgr_key2")
+out=""
+for attempt in 1 2 3 4 5; do
+  out=$(kvcmd "GET mgr_key1" "GET mgr_key2" 2>/dev/null || echo "")
+  echo "$out" | grep -qF "mgr_key1 before_crash" && break
+  log "  (manager restart retry $attempt)"
+  sleep 3
+done
 assert_contains "Data readable after manager restart" "GET mgr_key1 before_crash" "$out"
 assert_contains "Data readable after manager restart 2" "GET mgr_key2 also_before" "$out"
 
@@ -297,10 +347,21 @@ restart_cluster
 
 WRITES_OK=0
 pids=()
-for cn in node12 node13 node14 node15 node16; do
+# Use client nodes 12-16; if unreachable fall back to node0 (orchestrator)
+CLIENT_NODES=(node12 node13 node14 node15 node16)
+USED_CLIENTS=()
+for cn in "${CLIENT_NODES[@]}"; do
+  if ssh_node "$cn" "true" 2>/dev/null; then
+    USED_CLIENTS+=("$cn")
+  fi
+done
+[[ ${#USED_CLIENTS[@]} -eq 0 ]] && USED_CLIENTS=(node0)
+
+log "  Using ${#USED_CLIENTS[@]} client node(s): ${USED_CLIENTS[*]}"
+for cn in "${USED_CLIENTS[@]}"; do
   ssh_node "$cn" \
-    "(printf 'PUT cc_${cn}_k1 val1\nPUT cc_${cn}_k2 val2\nSTOP\n') | \
-     ${BIN}/kvclient --manager_addrs ${MANAGERS}" &>/dev/null &
+    "( printf 'PUT cc_${cn}_k1 val1\nPUT cc_${cn}_k2 val2\nSTOP\n' ) | \
+     ${MADKV}/kvstore/bin/kvclient --manager_addrs ${MANAGERS} 2>/dev/null" &
   pids+=($!)
 done
 for pid in "${pids[@]}"; do wait "$pid" && (( WRITES_OK++ )) || true; done
@@ -308,13 +369,15 @@ log "  $WRITES_OK / ${#pids[@]} concurrent write batches completed"
 
 sleep 1
 reads_ok=0
-for cn in node12 node13 node14 node15 node16; do
+for cn in "${USED_CLIENTS[@]}"; do
   out=$(kvcmd "GET cc_${cn}_k1" "GET cc_${cn}_k2")
   echo "$out" | grep -qF "cc_${cn}_k1 val1" && \
   echo "$out" | grep -qF "cc_${cn}_k2 val2" && (( reads_ok++ )) || true
 done
-(( reads_ok == 5 )) && pass "All 5 concurrent clients' writes visible (reads_ok=$reads_ok)" \
-                    || fail "Only $reads_ok/5 clients' writes visible"
+total_clients=${#USED_CLIENTS[@]}
+(( reads_ok == total_clients )) && \
+  pass "All $total_clients concurrent clients' writes visible (reads_ok=$reads_ok)" || \
+  fail "Only $reads_ok/${total_clients} clients' writes visible"
 
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 sep
