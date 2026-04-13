@@ -23,17 +23,35 @@ CFG="${SCRIPT_DIR}/config.sh"
 source "$CFG"
 
 CLEAN=0
+RF_OVERRIDE=""
+NPARTS_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --clean)         CLEAN=1;       shift ;;
-    --rf)            RF="$2";       shift 2 ;;
-    --nparts)        NPARTS="$2";   shift 2 ;;
+    --clean)         CLEAN=1;                  shift ;;
+    --rf)            RF_OVERRIDE="$2";         shift 2 ;;
+    --nparts)        NPARTS_OVERRIDE="$2";     shift 2 ;;
     *)               echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
 
-# Re-source config to recompute derived values after overrides
+# Re-source config to recompute derived values, then re-apply CLI overrides
 source "$CFG"
+[[ -n "$RF_OVERRIDE"     ]] && RF="$RF_OVERRIDE"
+[[ -n "$NPARTS_OVERRIDE" ]] && NPARTS="$NPARTS_OVERRIDE"
+
+# Recompute derived values that depend on RF / NPARTS
+SERVER_ADDRS=()
+for ((i=0; i < NPARTS*RF; i++)); do
+  SERVER_ADDRS[$i]="${NODE_ADDRS[$((i+2))]}"
+done
+SERVERS=""
+SERVER_P2PS=""
+for ((i=0; i < NPARTS*RF; i++)); do
+  [[ -n "$SERVERS" ]]     && SERVERS+=","
+  [[ -n "$SERVER_P2PS" ]] && SERVER_P2PS+=","
+  SERVERS+="${SERVER_ADDRS[$i]}:$((API_BASE + i))"
+  SERVER_P2PS+="${SERVER_ADDRS[$i]}:$((P2P_BASE + i))"
+done
 
 PLOG="/tmp/madkv-p3/start_all.log"
 mkdir -p "$(dirname "$PLOG")"
@@ -74,18 +92,26 @@ if [[ $CLEAN -eq 1 ]]; then
   log "Backer directories cleaned."
 fi
 
-# ── Upload updated config to all nodes ───────────────────────────────────────
+# ── Upload updated config + scripts to all nodes ─────────────────────────────
 log "Uploading config.sh to all nodes..."
+upload_script() {
+  local host="$1" script="$2"
+  scp -o StrictHostKeyChecking=no "${SCRIPT_DIR}/${script}" \
+      "${host}:${MADKV}/scripts/p3/${script}" 2>/dev/null
+}
 upload_config "${NODE_HOSTS[1]}" &
+upload_script  "${NODE_HOSTS[1]}" "start_manager.sh" &
 for ((i=0; i < NPARTS*RF; i++)); do
-  upload_config "${NODE_HOSTS[$((i+2))]}" &
+  upload_config  "${NODE_HOSTS[$((i+2))]}" &
+  upload_script  "${NODE_HOSTS[$((i+2))]}" "start_server.sh" &
 done
 wait
 
 # ── Start manager (node1) ─────────────────────────────────────────────────────
 log "Starting manager on ${NODE_HOSTS[1]} (${NODE_ADDRS[1]}:${MAN_PORT})..."
 ssh_cmd "${NODE_HOSTS[1]}" \
-    "bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh"
+    "OVERRIDE_RF='${RF}' OVERRIDE_SERVERS='${SERVERS}' \
+     bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh"
 sleep 1
 
 # ── Start server replicas (nodes 2+) in parallel ─────────────────────────────
@@ -97,7 +123,7 @@ for ((p=0; p < NPARTS; p++)); do
     host="${NODE_HOSTS[$node_idx]}"
     log "  s${p}.${r}  →  ${host} (api=${NODE_ADDRS[$node_idx]}:$((API_BASE + idx)))"
     ssh_cmd "$host" \
-        "bash ${MADKV}/scripts/p3/start_server.sh ${p} ${r} ${MADKV}/scripts/p3/config.sh" &
+        "OVERRIDE_RF='${RF}' bash ${MADKV}/scripts/p3/start_server.sh ${p} ${r} ${MADKV}/scripts/p3/config.sh" &
   done
 done
 wait

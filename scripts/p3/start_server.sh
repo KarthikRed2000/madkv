@@ -22,6 +22,17 @@ CFG="${3:-${SCRIPT_DIR}/config.sh}"
 # shellcheck source=config.sh
 source "$CFG"
 
+# Allow caller to override RF via environment variable so that port/peer
+# calculations match what start_all.sh computed with a non-default RF.
+if [[ -n "${OVERRIDE_RF:-}" ]]; then
+  RF="$OVERRIDE_RF"
+  # Recompute SERVER_ADDRS with the new RF
+  SERVER_ADDRS=()
+  for ((i=0; i < NPARTS*RF; i++)); do
+    SERVER_ADDRS[$i]="${NODE_ADDRS[$((i+2))]}"
+  done
+fi
+
 TAG="s${PART_ID}.${REP_ID}"
 API_PORT="$(get_server_api_port "$PART_ID" "$REP_ID")"
 P2P_PORT="$(get_server_p2p_port "$PART_ID" "$REP_ID")"

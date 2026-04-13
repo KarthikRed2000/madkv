@@ -14,6 +14,11 @@ CFG="${1:-${SCRIPT_DIR}/config.sh}"
 # shellcheck source=config.sh
 source "$CFG"
 
+# Allow caller to override RF / SERVERS via environment variables
+# (used by start_all.sh when --rf or --nparts flags are passed)
+[[ -n "${OVERRIDE_RF:-}"      ]] && RF="$OVERRIDE_RF"
+[[ -n "${OVERRIDE_SERVERS:-}" ]] && SERVERS="$OVERRIDE_SERVERS"
+
 REPLICA_ID=0   # single manager for baseline; increment if adding manager replicas
 
 BACKER="$(get_backer "m.${REPLICA_ID}")"

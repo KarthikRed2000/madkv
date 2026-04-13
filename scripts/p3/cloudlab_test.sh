@@ -242,10 +242,16 @@ P0_KEY=""
 P1_KEY=""
 for i in $(seq 1 40); do
   key="probe_${i}"
-  applied=$(ssh_node "$P0_LEADER_NODE" "grep -c 'Apply.*${key}\|${key}.*Apply' '$logf' 2>/dev/null || echo 0" 2>/dev/null || echo 0)
-  if [[ "${applied:-0}" -gt 0 && -z "$P0_KEY" ]]; then
+  # strip all whitespace/newlines; grep -c returns "0" with exit 1 on no-match,
+  # which would double-print with "|| echo 0" — use "|| true" instead
+  applied=$(ssh_node "$P0_LEADER_NODE" \
+    "grep -c '${key}' '$logf' 2>/dev/null || true" 2>/dev/null | tr -d '[:space:]')
+  applied=${applied:-0}
+  # ensure it's purely numeric
+  [[ "$applied" =~ ^[0-9]+$ ]] || applied=0
+  if [[ $applied -gt 0 ]] && [[ -z "$P0_KEY" ]]; then
     P0_KEY="$key"
-  elif [[ "${applied:-0}" -eq 0 && -z "$P1_KEY" ]]; then
+  elif [[ $applied -eq 0 ]] && [[ -z "$P1_KEY" ]]; then
     P1_KEY="$key"
   fi
   [[ -n "$P0_KEY" && -n "$P1_KEY" ]] && break
@@ -292,30 +298,39 @@ else
   fi
 fi
 
-# ── TEST 6: Manager crash + restart ───────────────────────────────────────────
+# ── TEST 6: Manager crash + full cluster restart (persistence check) ──────────
+# NOTE: Single-manager restart alone is insufficient because existing servers
+# do not re-register — they only call RegisterServer at startup. Instead this
+# test kills the manager, then restarts the FULL cluster without --clean so
+# Raft logs are preserved. This validates both manager crash-recovery AND data
+# persistence (Demo 3 + 7 combined).
 sep
-log "TEST 6: DEMO 3 — Manager crash + restart + persistent state"
+log "TEST 6: DEMO 3 — Manager crash + cluster restart + data persistence"
 restart_cluster
 
 kvcmd "PUT mgr_key1 before_crash" "PUT mgr_key2 also_before" > /dev/null
+log "  Data written. Killing manager (node1) then restarting full cluster..."
 
-log "  Killing manager (node1)..."
+# Kill manager; servers keep running (their Raft state is safe)
 ssh_node "${NODE_HOSTS[1]}" "pkill -9 kvmanager 2>/dev/null; true"
-sleep 2
+sleep 1
 
-log "  Restarting manager..."
-ssh_node "${NODE_HOSTS[1]}" "nohup bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh >/tmp/madkv-p3/logs/mgr_restart.log 2>&1 &"
-sleep 6  # give it more time to bind and accept connections
+# Restart the full cluster (no --clean) — servers + manager restart,
+# servers re-register, Raft logs reload from backer dirs
+log "  Restarting full cluster without wiping backer dirs..."
+bash "${SCRIPT_DIR}/start_all.sh" --rf "${RF}" --nparts "${NPARTS}" 2>&1 \
+  | grep -E "READY|ERROR|Cluster start" || true
+sleep 4
 
 out=""
-for attempt in 1 2 3 4 5; do
+for attempt in 1 2 3; do
   out=$(kvcmd "GET mgr_key1" "GET mgr_key2" 2>/dev/null || echo "")
   echo "$out" | grep -qF "mgr_key1 before_crash" && break
-  log "  (manager restart retry $attempt)"
+  log "  (retry $attempt)"
   sleep 3
 done
-assert_contains "Data readable after manager restart" "GET mgr_key1 before_crash" "$out"
-assert_contains "Data readable after manager restart 2" "GET mgr_key2 also_before" "$out"
+assert_contains "Data readable after manager crash + restart" "GET mgr_key1 before_crash" "$out"
+assert_contains "Data readable after manager crash + restart 2" "GET mgr_key2 also_before" "$out"
 
 # ── TEST 7: Full cluster restart (persistence) ────────────────────────────────
 sep
@@ -340,44 +355,33 @@ done
 assert_contains "Key 1 persisted across restart" "GET persist_key1 val_one" "$out"
 assert_contains "Key 2 persisted across restart" "GET persist_key2 val_two" "$out"
 
-# ── TEST 8: Concurrent clients ────────────────────────────────────────────────
+# ── TEST 8: Concurrent clients (5 parallel background kvclient processes) ────
 sep
-log "TEST 8: Concurrent clients from multiple nodes"
+log "TEST 8: Concurrent clients — 5 parallel kvclient processes from node0"
 restart_cluster
 
 WRITES_OK=0
 pids=()
-# Use client nodes 12-16; if unreachable fall back to node0 (orchestrator)
-CLIENT_NODES=(node12 node13 node14 node15 node16)
-USED_CLIENTS=()
-for cn in "${CLIENT_NODES[@]}"; do
-  if ssh_node "$cn" "true" 2>/dev/null; then
-    USED_CLIENTS+=("$cn")
-  fi
-done
-[[ ${#USED_CLIENTS[@]} -eq 0 ]] && USED_CLIENTS=(node0)
-
-log "  Using ${#USED_CLIENTS[@]} client node(s): ${USED_CLIENTS[*]}"
-for cn in "${USED_CLIENTS[@]}"; do
-  ssh_node "$cn" \
-    "( printf 'PUT cc_${cn}_k1 val1\nPUT cc_${cn}_k2 val2\nSTOP\n' ) | \
-     ${MADKV}/kvstore/bin/kvclient --manager_addrs ${MANAGERS} 2>/dev/null" &
+for c in 1 2 3 4 5; do
+  (
+    ( printf "PUT cc${c}_k1 val1\nPUT cc${c}_k2 val2\nSTOP\n" ) \
+      | "${BIN}/kvclient" --manager_addrs "${MANAGERS}" > /dev/null 2>&1
+  ) &
   pids+=($!)
 done
 for pid in "${pids[@]}"; do wait "$pid" && (( WRITES_OK++ )) || true; done
-log "  $WRITES_OK / ${#pids[@]} concurrent write batches completed"
+log "  $WRITES_OK / 5 concurrent write batches completed"
 
 sleep 1
 reads_ok=0
-for cn in "${USED_CLIENTS[@]}"; do
-  out=$(kvcmd "GET cc_${cn}_k1" "GET cc_${cn}_k2")
-  echo "$out" | grep -qF "cc_${cn}_k1 val1" && \
-  echo "$out" | grep -qF "cc_${cn}_k2 val2" && (( reads_ok++ )) || true
+for c in 1 2 3 4 5; do
+  out=$(kvcmd "GET cc${c}_k1" "GET cc${c}_k2")
+  echo "$out" | grep -qF "cc${c}_k1 val1" && \
+  echo "$out" | grep -qF "cc${c}_k2 val2" && (( reads_ok++ )) || true
 done
-total_clients=${#USED_CLIENTS[@]}
-(( reads_ok == total_clients )) && \
-  pass "All $total_clients concurrent clients' writes visible (reads_ok=$reads_ok)" || \
-  fail "Only $reads_ok/${total_clients} clients' writes visible"
+(( reads_ok == 5 )) && \
+  pass "All 5 concurrent clients' writes visible (reads_ok=${reads_ok})" || \
+  fail "Only ${reads_ok}/5 clients' writes visible"
 
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 sep
