@@ -75,10 +75,10 @@ fi
 
 # Clone or update the repo
 if [[ -d "${MADKV}/.git" ]]; then
-  echo "[$(hostname)] Removing existing repo at ${MADKV}..."
-  rm -rf "${MADKV}"
-  echo "[$(hostname)] Cloning ${REPO} (${BRANCH})..."
-  git clone --quiet --branch "${BRANCH}" "${REPO}" "${MADKV}"
+  echo "[$(hostname)] Pulling latest from ${BRANCH}..."
+  git -C "${MADKV}" fetch --quiet origin
+  git -C "${MADKV}" checkout --quiet "${BRANCH}"
+  git -C "${MADKV}" pull --quiet origin "${BRANCH}"
 else
   echo "[$(hostname)] Cloning ${REPO} (${BRANCH})..."
   git clone --quiet --branch "${BRANCH}" "${REPO}" "${MADKV}"
