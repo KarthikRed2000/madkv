@@ -157,11 +157,13 @@ target_link_libraries(kvclient
 add_executable(kvmanager src/manager.cpp)
 
 target_include_directories(kvmanager PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src   # for raft.h
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_link_libraries(kvmanager
     cluster_proto
+    raft_proto          # Raft gRPC stubs used by replicated manager
     grpc++ grpc protobuf
     Threads::Threads
 )

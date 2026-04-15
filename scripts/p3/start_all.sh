@@ -73,13 +73,16 @@ upload_config() {
 # ── Stop everything first ─────────────────────────────────────────────────────
 log "Stopping any existing P3 processes..."
 "${SCRIPT_DIR}/stop_all.sh" 2>/dev/null || true
-sleep 1
+sleep 3  # allow ports to be released after SIGKILL
 
 # ── Optionally wipe backer directories ───────────────────────────────────────
 if [[ $CLEAN -eq 1 ]]; then
   log "Cleaning backer directories on all nodes..."
 
-  ssh_cmd "${NODE_HOSTS[1]}" "rm -rf /tmp/madkv-p3 && mkdir -p /tmp/madkv-p3/logs" &
+  # All manager replica nodes
+  for ((m=0; m<MGR_RF; m++)); do
+    ssh_cmd "${MGR_HOSTS[$m]}" "rm -rf /tmp/madkv-p3 && mkdir -p /tmp/madkv-p3/logs" &
+  done
 
   for ((p=0; p < NPARTS; p++)); do
     for ((r=0; r < RF; r++)); do
@@ -93,26 +96,32 @@ if [[ $CLEAN -eq 1 ]]; then
 fi
 
 # ── Upload updated config + scripts to all nodes ─────────────────────────────
-log "Uploading config.sh to all nodes..."
+log "Uploading config.sh and scripts to all nodes..."
 upload_script() {
   local host="$1" script="$2"
   scp -o StrictHostKeyChecking=no "${SCRIPT_DIR}/${script}" \
       "${host}:${MADKV}/scripts/p3/${script}" 2>/dev/null
 }
-upload_config "${NODE_HOSTS[1]}" &
-upload_script  "${NODE_HOSTS[1]}" "start_manager.sh" &
+for ((m=0; m<MGR_RF; m++)); do
+  upload_config  "${MGR_HOSTS[$m]}" &
+  upload_script  "${MGR_HOSTS[$m]}" "start_manager_replica.sh" &
+done
 for ((i=0; i < NPARTS*RF; i++)); do
   upload_config  "${NODE_HOSTS[$((i+2))]}" &
   upload_script  "${NODE_HOSTS[$((i+2))]}" "start_server.sh" &
 done
 wait
 
-# ── Start manager (node1) ─────────────────────────────────────────────────────
-log "Starting manager on ${NODE_HOSTS[1]} (${NODE_ADDRS[1]}:${MAN_PORT})..."
-ssh_cmd "${NODE_HOSTS[1]}" \
-    "OVERRIDE_RF='${RF}' OVERRIDE_SERVERS='${SERVERS}' \
-     bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh"
-sleep 1
+# ── Start all manager replicas in parallel ────────────────────────────────────
+log "Starting ${MGR_RF} manager replica(s)..."
+for ((m=0; m<MGR_RF; m++)); do
+  log "  m.${m}  →  ${MGR_HOSTS[$m]} (api=${MGR_ADDRS[$m]}:$((MAN_PORT+m)) p2p=$((MGR_P2P_PORT+m)))"
+  ssh_cmd "${MGR_HOSTS[$m]}" \
+      "OVERRIDE_RF='${RF}' OVERRIDE_SERVERS='${SERVERS}' \
+       bash ${MADKV}/scripts/p3/start_manager_replica.sh ${m} ${MADKV}/scripts/p3/config.sh" &
+done
+wait
+sleep 3   # allow Raft election to complete
 
 # ── Start server replicas (nodes 2+) in parallel ─────────────────────────────
 log "Starting ${NPARTS} partition(s) × RF=${RF} replicas..."
@@ -128,18 +137,21 @@ for ((p=0; p < NPARTS; p++)); do
 done
 wait
 
-# ── Wait for cluster to become ready ─────────────────────────────────────────
+# ── Wait for cluster to become ready (check all manager logs) ────────────────
 log "Waiting for all servers to register with manager..."
-total=$((NPARTS * RF))
-for ((attempt=1; attempt<=60; attempt++)); do
-  ready=$(ssh_cmd "${NODE_HOSTS[1]}" \
-    "grep -c 'cluster ready state: ready' /tmp/madkv-p3/logs/manager-0.log 2>/dev/null || true")
-  if [[ "${ready:-0}" -ge 1 ]]; then
+for ((attempt=1; attempt<=90; attempt++)); do
+  ready=0
+  for ((m=0; m<MGR_RF; m++)); do
+    cnt=$(ssh_cmd "${MGR_HOSTS[$m]}" \
+      "grep -c 'cluster ready state: ready' /tmp/madkv-p3/logs/manager-${m}.log 2>/dev/null || true")
+    [[ "${cnt:-0}" -ge 1 ]] && ready=1 && break
+  done
+  if [[ $ready -eq 1 ]]; then
     log "Cluster READY after ${attempt}s  (managers=${MANAGERS}  servers=${SERVERS})"
     break
   fi
-  if [[ $attempt -eq 60 ]]; then
-    log "WARNING: cluster did not report ready after 60s — check logs on node1"
+  if [[ $attempt -eq 90 ]]; then
+    log "WARNING: cluster did not report ready after 90s — check manager logs"
   fi
   sleep 1
 done
@@ -147,7 +159,8 @@ done
 log "═══════════════════════════════════════════════════════════"
 log "Cluster started.  Topology:"
 log "  Partitions : ${NPARTS}"
-log "  RF         : ${RF}"
+log "  Server RF  : ${RF}"
+log "  Manager RF : ${MGR_RF}"
 log "  MANAGERS   : ${MANAGERS}"
 log "  SERVERS    : ${SERVERS}"
 log ""

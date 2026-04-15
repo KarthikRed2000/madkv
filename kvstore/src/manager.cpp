@@ -1,7 +1,9 @@
 #include <grpcpp/grpcpp.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -11,6 +13,8 @@
 #include <vector>
 
 #include "cluster.grpc.pb.h"
+#include "raft.h"
+#include "raft.grpc.pb.h"
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -111,84 +115,173 @@ class ClusterManagerService final : public ClusterManager::Service {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// P3 multi-replica manager service
+// P3 Bonus: Raft-backed replicated cluster manager
 //
 // server_addrs layout: [p0r0, p0r1, ..., p0r(rf-1), p1r0, p1r1, ...]
 // server_id = partition_id * server_rf + replica_id
+//
+// RegisterServer commands are replicated through Raft before being applied to
+// the in-memory registered_ table, ensuring all manager replicas converge to
+// the same registration state even after crashes and leader changes.
+//
+// GetCluster is served directly from the leader's in-memory state (read-only).
+// Non-leaders return ready=false so callers naturally retry other manager addrs.
 // ─────────────────────────────────────────────────────────────────────────────
-class P3ClusterManagerService final : public ClusterManager::Service {
+
+// Raft P2P gRPC service — forwards RequestVote/AppendEntries to the RaftNode.
+class ManagerRaftServiceImpl final : public raft::RaftService::Service {
  public:
-  P3ClusterManagerService(int server_rf, std::vector<std::string> server_addrs)
+  explicit ManagerRaftServiceImpl(RaftNode* raft) : raft_(raft) {}
+
+  grpc::Status RequestVote(ServerContext*,
+                           const raft::RequestVoteRequest*  req,
+                           raft::RequestVoteResponse*       res) override {
+    raft_->HandleRequestVote(req, res);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AppendEntries(ServerContext*,
+                             const raft::AppendEntriesRequest*  req,
+                             raft::AppendEntriesResponse*       res) override {
+    raft_->HandleAppendEntries(req, res);
+    return grpc::Status::OK;
+  }
+
+ private:
+  RaftNode* raft_;
+};
+
+// Raft-backed ClusterManager service.
+class RaftManagerService final : public ClusterManager::Service {
+ public:
+  // all_p2p_addrs[i] = P2P listen address of manager replica i (indexed by replica_id).
+  // We reuse the same addresses as Raft "API addrs" (leader hints) — callers
+  // do not rely on those hints (they round-robin through all manager_addrs).
+  RaftManagerService(int server_rf,
+                     std::vector<std::string> server_addrs,
+                     int replica_id,
+                     std::vector<std::string> all_p2p_addrs,
+                     const std::string& backer_path)
       : server_rf_(server_rf),
         server_addrs_(std::move(server_addrs)),
         registered_(server_addrs_.size(), false) {
-    num_partitions_ = static_cast<uint32_t>(server_addrs_.size() / server_rf_);
-    Log("P3 manager: partitions=" + std::to_string(num_partitions_) +
-        " rf=" + std::to_string(server_rf_) +
-        " total_servers=" + std::to_string(server_addrs_.size()));
+
+    std::filesystem::create_directories(backer_path);
+    // Debug: print raw values before building log string
+    std::cerr << "[DEBUG] rf=" << server_rf_
+              << " addrs=" << server_addrs_.size()
+              << " nparts=" << NumPartitions() << std::endl;
+    Log("RaftManager start: replica=" + std::to_string(replica_id) +
+        " mgr_rf=" + std::to_string(all_p2p_addrs.size()) +
+        " partitions=" + std::to_string(NumPartitions()) +
+        " server_rf=" + std::to_string(server_rf_));
+
+    raft_ = std::make_unique<RaftNode>(
+        replica_id,
+        all_p2p_addrs,   // api_addrs: used only for leader hint messages
+        all_p2p_addrs,   // p2p_addrs: Raft peer communication
+        backer_path,
+        [this](const KVCmd& cmd) -> KVResult { return ApplyCommand(cmd); });
+    raft_->Start();
   }
 
-  Status RegisterServer(ServerContext* context, const RegisterServerRequest* request,
-                        RegisterServerResponse* response) override {
-    (void)context;
-    std::lock_guard<std::mutex> lock(mu_);
-    uint32_t sid = request->server_id();
-    if (sid >= server_addrs_.size()) {
-      response->set_ok(false);
-      response->set_error("invalid server id " + std::to_string(sid));
+  RaftNode* GetRaft() { return raft_.get(); }
+
+  Status RegisterServer(ServerContext*,
+                        const RegisterServerRequest* req,
+                        RegisterServerResponse*      res) override {
+    // Only the leader can commit registrations.
+    if (!raft_->IsLeader()) {
+      res->set_ok(false);
+      res->set_error("not_leader");
       return Status::OK;
     }
-    registered_[sid] = true;
-    uint32_t part_id  = sid / server_rf_;
-    uint32_t rep_id   = sid % server_rf_;
-    Log("registered sid=" + std::to_string(sid) +
-        " partition=" + std::to_string(part_id) +
-        " replica=" + std::to_string(rep_id) +
-        " api_addr=" + request->api_addr() +
-        " mapped_to=" + server_addrs_[sid]);
-    response->set_ok(true);
-    response->set_partition_id(part_id);
-    response->set_num_partitions(num_partitions_);
+    uint32_t sid = req->server_id();
+    if (sid >= server_addrs_.size()) {
+      res->set_ok(false);
+      res->set_error("invalid server id " + std::to_string(sid));
+      return Status::OK;
+    }
+    // Encode registration as PUT(key=server_id, value=api_addr) through Raft.
+    KVCmd cmd{KVCmdType::PUT, std::to_string(sid), req->api_addr()};
+    try {
+      raft_->Submit(cmd);
+    } catch (const NotLeaderError&) {
+      res->set_ok(false);
+      res->set_error("not_leader");
+      return Status::OK;
+    } catch (const std::exception& e) {
+      res->set_ok(false);
+      res->set_error(std::string("internal: ") + e.what());
+      return Status::OK;
+    }
+    res->set_ok(true);
+    res->set_partition_id(static_cast<uint32_t>(sid) / static_cast<uint32_t>(server_rf_));
+    res->set_num_partitions(NumPartitions());
     return Status::OK;
   }
 
-  Status GetCluster(ServerContext* context, const GetClusterRequest* request,
-                    GetClusterResponse* response) override {
-    (void)context;
-    (void)request;
-    std::lock_guard<std::mutex> lock(mu_);
-
-    bool ready = true;
-    for (bool r : registered_) if (!r) { ready = false; break; }
-    response->set_ready(ready);
-
+  Status GetCluster(ServerContext*,
+                    const GetClusterRequest*,
+                    GetClusterResponse* res) override {
+    // Non-leaders return not-ready so callers try the next manager address.
+    if (!raft_->IsLeader()) {
+      res->set_ready(false);
+      return Status::OK;
+    }
+    std::lock_guard<std::mutex> g(mu_);
+    bool ready = std::all_of(registered_.begin(), registered_.end(),
+                             [](bool v) { return v; });
+    res->set_ready(ready);
     if (!has_last_ready_ || ready != last_ready_) {
       Log(std::string("cluster ready state: ") + (ready ? "ready" : "not_ready"));
       has_last_ready_ = true;
       last_ready_     = ready;
     }
-
-    for (uint32_t p = 0; p < num_partitions_; p++) {
-      PartitionInfo* pi = response->add_partitions();
+    const uint32_t nparts = NumPartitions();
+    for (uint32_t p = 0; p < nparts; p++) {
+      PartitionInfo* pi = res->add_partitions();
       pi->set_partition_id(p);
       pi->set_server_id(p * server_rf_);
-      pi->set_api_addr(server_addrs_[p * server_rf_]);  // first replica (P2 compat)
+      pi->set_api_addr(server_addrs_[p * server_rf_]);
       pi->set_registered(registered_[p * server_rf_]);
-      for (int r = 0; r < server_rf_; r++) {
+      for (int r = 0; r < server_rf_; r++)
         pi->add_replica_addrs(server_addrs_[p * server_rf_ + r]);
-      }
     }
     return Status::OK;
   }
 
  private:
-  std::mutex   mu_;
-  int          server_rf_;
-  uint32_t     num_partitions_ = 0;
-  std::vector<std::string> server_addrs_;
-  std::vector<bool>        registered_;
-  bool has_last_ready_ = false;
-  bool last_ready_     = false;
+  // Compute number of KV partitions from stable members (avoids stored-value UB).
+  uint32_t NumPartitions() const {
+    return server_rf_ > 0
+        ? static_cast<uint32_t>(server_addrs_.size()) / static_cast<uint32_t>(server_rf_)
+        : 0u;
+  }
+
+  // Called by RaftNode's apply thread (outside mu_) for each committed entry.
+  KVResult ApplyCommand(const KVCmd& cmd) {
+    if (cmd.type == KVCmdType::PUT) {
+      auto sid = static_cast<uint32_t>(std::stoul(cmd.key));
+      std::lock_guard<std::mutex> g(mu_);
+      if (sid < registered_.size() && !registered_[sid]) {
+        registered_[sid] = true;
+        Log("applied registration: sid=" + std::to_string(sid) +
+            " partition=" + std::to_string(sid / server_rf_) +
+            " replica=" + std::to_string(sid % server_rf_) +
+            " api_addr=" + cmd.value);
+      }
+    }
+    return KVResult{};
+  }
+
+  const int                 server_rf_;
+  std::vector<std::string>  server_addrs_;
+  mutable std::mutex        mu_;
+  std::vector<bool>         registered_;
+  bool                      has_last_ready_ = false;
+  bool                      last_ready_     = false;
+  std::unique_ptr<RaftNode> raft_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -243,20 +336,50 @@ static P3ManagerArgs ParseP3ManagerArgs(int argc, char** argv) {
 static void RunP3Manager(const P3ManagerArgs& args) {
   if (args.server_addrs.empty())
     throw std::runtime_error("--server_addrs is required");
+  if (args.man_port.empty())
+    throw std::runtime_error("--man_port is required");
 
-  std::string listen_addr = "0.0.0.0:" + args.man_port;
+  std::string man_listen = "0.0.0.0:" + args.man_port;
+  std::string p2p_listen = "0.0.0.0:" + args.p2p_port;
+
+  // Build full P2P address list indexed by replica_id.
+  // args.peer_addrs are sorted by replica_id, self excluded — insert self at our slot.
+  std::vector<std::string> all_p2p_addrs = args.peer_addrs;
+  all_p2p_addrs.insert(all_p2p_addrs.begin() + args.replica_id, p2p_listen);
+
+  std::string backer = args.backer_path.empty()
+      ? "/tmp/madkv-p3/backer.m." + std::to_string(args.replica_id)
+      : args.backer_path;
+
   Log("P3 manager startup replica_id=" + std::to_string(args.replica_id) +
-      " listen=" + listen_addr +
+      " man_listen=" + man_listen +
+      " p2p_listen=" + p2p_listen +
+      " mgr_rf=" + std::to_string(all_p2p_addrs.size()) +
       " server_rf=" + std::to_string(args.server_rf) +
       " num_server_addrs=" + std::to_string(args.server_addrs.size()));
 
-  P3ClusterManagerService service(args.server_rf, args.server_addrs);
-  ServerBuilder builder;
-  builder.AddListeningPort(listen_addr, grpc::InsecureServerCredentials());
-  builder.RegisterService(&service);
-  std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "P3 Manager listening on " << listen_addr << std::endl;
-  server->Wait();
+  // ── Raft-backed manager service ────────────────────────────────────────────
+  RaftManagerService mgr_svc(
+      args.server_rf, args.server_addrs,
+      args.replica_id, all_p2p_addrs, backer);
+
+  // ── P2P gRPC server (Raft inter-replica communication) ────────────────────
+  ManagerRaftServiceImpl raft_svc(mgr_svc.GetRaft());
+  ServerBuilder p2p_builder;
+  p2p_builder.AddListeningPort(p2p_listen, grpc::InsecureServerCredentials());
+  p2p_builder.RegisterService(&raft_svc);
+  std::unique_ptr<Server> p2p_server(p2p_builder.BuildAndStart());
+  Log("Raft P2P server listening on " + p2p_listen);
+
+  // ── API gRPC server (clients + KV servers connect here) ──────────────────
+  ServerBuilder api_builder;
+  api_builder.AddListeningPort(man_listen, grpc::InsecureServerCredentials());
+  api_builder.RegisterService(&mgr_svc);
+  std::unique_ptr<Server> api_server(api_builder.BuildAndStart());
+  std::cout << "P3 Manager listening on " << man_listen
+            << " (replica " << args.replica_id
+            << ", mgr_rf=" << all_p2p_addrs.size() << ")" << std::endl;
+  api_server->Wait();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -104,9 +104,16 @@ CLIENT_HOSTS=(
 NPARTS=2    # number of key-space partitions
 RF=5        # server replication factor (1, 3, or 5; must satisfy 2*RF+1 nodes per part)
 
+# ── Manager replication (Bonus) ───────────────────────────────────────────────
+# 3 manager replicas all hosted on node1 (same machine, different ports).
+# The spec allows co-locating replicas on the same physical host.
+MGR_RF=3
+MGR_HOSTS=("${NODE_HOSTS[1]}" "${NODE_HOSTS[1]}" "${NODE_HOSTS[1]}")
+MGR_ADDRS=("${NODE_ADDRS[1]}" "${NODE_ADDRS[1]}" "${NODE_ADDRS[1]}")
+
 # ── Port assignments ──────────────────────────────────────────────────────────
-MAN_PORT=3666      # manager client-facing port
-MGR_P2P_PORT=3606  # manager Raft P2P port (unused when single manager)
+MAN_PORT=3666      # manager API base port  (replica i listens on MAN_PORT+i)
+MGR_P2P_PORT=3606  # manager Raft P2P base port (replica i listens on MGR_P2P_PORT+i)
 API_BASE=3777      # server API ports: 3777 + (part*RF + rep)
 P2P_BASE=3707      # server Raft P2P ports: 3707 + (part*RF + rep)
 
@@ -118,9 +125,17 @@ LOG_DIR="/tmp/madkv-p3/logs"
 # ─────────────────────────────────────────────────────────────────────────────
 # Derived values — computed automatically; do not edit below this line
 # ─────────────────────────────────────────────────────────────────────────────
-MANAGER_ADDR="${NODE_ADDRS[1]}"
-MANAGERS="${MANAGER_ADDR}:${MAN_PORT}"
-MANAGER_P2PS="${MANAGER_ADDR}:${MGR_P2P_PORT}"
+# Build comma-separated MANAGERS and MANAGER_P2PS for all replicas
+MANAGERS=""
+MANAGER_P2PS=""
+for ((i=0; i<MGR_RF; i++)); do
+  [[ -n "$MANAGERS"     ]] && MANAGERS+=","
+  [[ -n "$MANAGER_P2PS" ]] && MANAGER_P2PS+=","
+  MANAGERS+="${MGR_ADDRS[$i]}:$((MAN_PORT + i))"
+  MANAGER_P2PS+="${MGR_ADDRS[$i]}:$((MGR_P2P_PORT + i))"
+done
+# Back-compat: single manager address (first replica)
+MANAGER_ADDR="${MGR_ADDRS[0]}"
 
 # SERVER_ADDRS[part*RF+rep] = hostname of that replica
 declare -a SERVER_ADDRS

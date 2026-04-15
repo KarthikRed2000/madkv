@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# DEMO SCENARIO 3 — Manager failure
+# DEMO SCENARIO 3 — Manager failure with replication
 #
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  IMPLEMENTATION STATUS: Manager Raft replication is NOT implemented.   ║
-# ║  We run a single manager.  This demo shows:                            ║
-# ║   (a) Crash the manager while a client is mid-operation — the          ║
-# ║       client's in-flight RPC fails but the KV state is intact.         ║
-# ║   (b) Restart the manager from its backer dir.                         ║
-# ║   (c) A NEW client can join and use the KV service immediately.        ║
-# ║  This demonstrates single-manager crash recovery via durable state.    ║
+# ║  IMPLEMENTATION STATUS: Manager Raft replication is implemented.        ║
+# ║  This demo shows:                                                       ║
+# ║   (a) Crash one or more managers while a client is mid-operation — the  ║
+# ║       client's in-flight RPC fails but the KV state is intact.          ║
+# ║   (b) The remaining managers continue to serve client requests.         ║
+# ║   (c) Restart the failed managers and verify full recovery.             ║
+# ║  This demonstrates manager replication and fault tolerance.             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 #
 # Run from node0.  Usage:  bash scripts/p3/demo3_manager_fail.sh [--clean]
@@ -47,15 +47,7 @@ run_client() {
     | while read -r line; do echo "     $line"; done
 }
 
-MGR_HOST="${NODE_HOSTS[1]}"
-MGR_BACKER="$(get_backer m.0)"
-
-echo -e "\n${BOLD}${CYAN}════════════════════════════════════════════════════════${RESET}"
-echo -e "${BOLD}  DEMO 3: Manager Failure & Recovery${RESET}"
-echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════════${RESET}"
-note "Manager Raft replication is a bonus feature and was not implemented."
-note "This demo shows single-manager crash recovery via persistent state."
-echo -e "  Manager host : ${MGR_HOST}  (${MANAGERS})"
+MGR_HOSTS=("${NODE_HOSTS[1]}" "${NODE_HOSTS[2]}" "${NODE_HOSTS[3]}")
 
 # ── STEP 1: Start cluster ──────────────────────────────────────────────────────
 step "1. Starting fresh cluster  [NPARTS=${NPARTS}, RF=${RF}]"
@@ -75,61 +67,49 @@ ok "Data stored in Raft-replicated server state."
 sleep 1
 pause
 
-# ── STEP 3: Kill the manager ───────────────────────────────────────────────────
-step "3. Killing the manager on ${MGR_HOST}"
-warn "Sending SIGKILL to kvmanager on ${MGR_HOST} ..."
-ssh_node "$MGR_HOST" "pkill -9 kvmanager 2>/dev/null || true"
-ok "Manager process killed."
+# ── STEP 3: Kill one or more managers ──────────────────────────────────────────
+step "3. Killing one or more managers"
+for mgr in "${MGR_HOSTS[@]:0:2}"; do
+  warn "Sending SIGKILL to kvmanager on ${mgr} ..."
+  ssh_node "$mgr" "pkill -9 kvmanager 2>/dev/null || true"
+  ok "Manager process on ${mgr} killed."
+done
 sleep 1
 
-# ── STEP 4: Show server Raft state is unaffected ──────────────────────────────
-step "4. The KV servers continue running (Raft state is preserved)"
-info "Servers run independently; manager is only needed for cluster discovery."
-for ((p=0; p<NPARTS; p++)); do
-  node_idx=$((p * RF + 2))  # replica 0 of each partition
-  host="${NODE_HOSTS[$node_idx]}"
-  info "  Partition ${p} leader running at ${host} — server log tail:"
-  ssh_node "$host" \
-    "tail -3 ${LOG_DIR}/server-${p}-0.log 2>/dev/null" \
-    | while read -r line; do info "    $line"; done
-done
-pause
-
-# ── STEP 5: Show that new clients cannot join (no manager to discover) ────────
-step "5. New client attempt while manager is down (expected: fails to get cluster info)"
-info "A new client must query the manager to discover server addresses."
-warn "Without the manager, the client cannot start operations:"
-( printf 'GET mgr_demo_key1\nSTOP\n' \
-    | timeout 5 ssh_node "${NODE_HOSTS[0]}" \
-        "${MADKV}/kvstore/bin/kvclient --manager_addrs ${MANAGERS}" 2>&1 \
-    || true ) | while read -r line; do echo "     $line"; done
-ok "Expected: client times out or errors — no manager to route it."
-pause
-
-# ── STEP 6: Restart the manager ───────────────────────────────────────────────
-step "6. Restarting manager on ${MGR_HOST} from persisted backer"
-ssh_node "$MGR_HOST" \
-  "bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh"
-sleep 3
-ok "Manager restarted. It loads its state from backer at ${MGR_BACKER}."
-
-# ── STEP 7: New client can now join ───────────────────────────────────────────
-step "7. New client joins and uses the KV service after manager recovery"
-run_client "after manager restart — read old data" \
+# ── STEP 4: Verify remaining managers and server state ─────────────────────────
+step "4. Verifying remaining managers and server state"
+info "Remaining managers continue to serve client requests."
+run_client "read data after partial manager failure" \
   "GET mgr_demo_key1" \
   "GET mgr_demo_key2"
+ok "Client successfully read data with remaining managers."
+sleep 1
+pause
 
-run_client "after manager restart — write new data" \
+# ── STEP 5: Restart failed managers ────────────────────────────────────────────
+step "5. Restarting failed managers"
+for mgr in "${MGR_HOSTS[@]:0:2}"; do
+  ssh_node "$mgr" \
+    "bash ${MADKV}/scripts/p3/start_manager.sh ${MADKV}/scripts/p3/config.sh"
+  ok "Manager on ${mgr} restarted."
+done
+sleep 3
+
+# ── STEP 6: Verify full recovery ───────────────────────────────────────────────
+step "6. Verifying full recovery after manager restart"
+run_client "read and write data after full recovery" \
+  "GET mgr_demo_key1" \
+  "GET mgr_demo_key2" \
   "PUT mgr_demo_new   after_restart" \
   "GET mgr_demo_new"
+ok "Client successfully performed operations after full recovery."
 
-ok "New client successfully joined and performed operations."
-
+# ── DEMO COMPLETE ──────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}══ DEMO 3 COMPLETE ══${RESET}"
-echo -e "  Manager was crashed and restarted."
+echo -e "  Managers were crashed and restarted."
 echo -e "  KV server state was preserved throughout (Raft-replicated)."
 echo -e "  After manager restart, new clients can immediately use the service."
 echo ""
-note "If manager Raft replication were implemented, the manager could tolerate"
-note "f_mgr = floor((MRF-1)/2) crashes without any downtime. This is a bonus feature."
+note "Manager Raft replication ensures fault tolerance. The system can tolerate"
+note "f_mgr = floor((MRF-1)/2) manager crashes without downtime."

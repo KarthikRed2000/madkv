@@ -1,0 +1,41 @@
+[33m[1mYCSB benchmark configuration:[39m[22m Args {
+    num_clis: 10,
+    num_ops: 200,
+    workload: 'd',
+    client_just_args: [
+        "p3::client",
+        "10.10.1.2:3666",
+    ],
+}
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+[33m[1mBenchmarking [Load] phase...[39m[22m
+  Launched 10 YCSB drivers, now waiting...
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+[33m[1mBenchmarking [Run] phase...[39m[22m
+  Launched 10 YCSB drivers, now waiting...
+[33m[1mBenchmarking results:[39m[22m  [36mYCSB-d[39m  [35m10 clients[39m
+  [36m[Load][39m   60094 ms
+    Throughput:      33.28 ops/sec
+    Latency:    INSERT  ops   2000  avg 288585.34  min  30256  max 1164704  p99 816645  us
+  [36m[Run] [39m    6488 ms
+    Throughput:     308.28 ops/sec
+    Latency:    INSERT  ops    116  avg  79356.86  min  36155  max 225728  p99 176516  us
+                READ    ops   1884  avg  24309.38  min    795  max 271035  p99 117109  us

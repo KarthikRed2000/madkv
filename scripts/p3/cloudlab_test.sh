@@ -61,6 +61,8 @@ restart_cluster() {
 
 kill_node() {
   local host="$1"
+  # Use name-based pkill (without -f) to avoid killing the remote shell itself,
+  # since the SSH command line contains "kvserver" and pkill -f would match it.
   ssh_node "$host" "pkill -9 kvserver 2>/dev/null; true"
 }
 
@@ -382,6 +384,51 @@ done
 (( reads_ok == 5 )) && \
   pass "All 5 concurrent clients' writes visible (reads_ok=${reads_ok})" || \
   fail "Only ${reads_ok}/5 clients' writes visible"
+
+# ── TEST 9 (BONUS): Replicated Manager — kill leader, new clients still work ──
+sep
+log "TEST 9 (BONUS): Replicated Manager — manager leader crash, service continues"
+restart_cluster
+
+# Write baseline data
+kvcmd "PUT mgr_rep_key hello_from_mgr" > /dev/null
+log "  Data written via all 3 manager replicas."
+
+# Find which manager replica is the Raft leader
+MGR_LEADER_IDX=-1
+MGR_LEADER_HOST=""
+for ((m=0; m<MGR_RF; m++)); do
+  host="${MGR_HOSTS[$m]}"
+  logf="${LOG_DIR}/manager-${m}.log"
+  is_leader=$(ssh_node "$host" \
+    "grep -c 'became LEADER' '${logf}' 2>/dev/null || true" | tr -d '[:space:]')
+  if [[ "${is_leader:-0}" -gt 0 ]]; then
+    MGR_LEADER_IDX=$m
+    MGR_LEADER_HOST="$host"
+    break
+  fi
+done
+
+if [[ $MGR_LEADER_IDX -lt 0 ]]; then
+  log "  WARNING: could not identify manager leader — killing manager 0"
+  MGR_LEADER_IDX=0
+  MGR_LEADER_HOST="${MGR_HOSTS[0]}"
+fi
+# Kill only the leader's kvmanager process by matching its unique --man_port
+MGR_LEADER_PORT=$((MAN_PORT + MGR_LEADER_IDX))
+log "  Killing manager leader m.${MGR_LEADER_IDX} (port ${MGR_LEADER_PORT}) on ${MGR_LEADER_HOST}..."
+ssh_node "$MGR_LEADER_HOST" \
+  "pkill -9 -f 'kvmanager.*--man_port ${MGR_LEADER_PORT}' 2>/dev/null; true"
+sleep 6  # allow remaining 2 managers to elect a new leader
+
+# A fresh client must be able to read through the remaining 2 managers
+log "  Testing that a new client can still read from the 2 remaining managers..."
+out=$(kvcmd "GET mgr_rep_key")
+assert_contains "Manager fault-tolerance: read after leader crash" "GET mgr_rep_key hello_from_mgr" "$out"
+
+# Also verify writing still works (new leader accepts writes through Raft)
+out2=$(kvcmd "PUT mgr_rep_key2 post_crash" "GET mgr_rep_key2")
+assert_contains "Manager fault-tolerance: write after leader crash" "GET mgr_rep_key2 post_crash" "$out2"
 
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 sep

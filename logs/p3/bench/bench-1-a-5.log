@@ -1,0 +1,23 @@
+[33m[1mYCSB benchmark configuration:[39m[22m Args {
+    num_clis: 1,
+    num_ops: 200,
+    workload: 'a',
+    client_just_args: [
+        "p3::client",
+        "10.10.1.2:3666",
+    ],
+}
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+[33m[1mBenchmarking [Load] phase...[39m[22m
+  Launched 1 YCSB drivers, now waiting...
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+[33m[1mBenchmarking [Run] phase...[39m[22m
+  Launched 1 YCSB drivers, now waiting...
+[33m[1mBenchmarking results:[39m[22m  [36mYCSB-a[39m  [35m1 clients[39m
+  [36m[Load][39m   86789 ms
+    Throughput:       2.30 ops/sec
+    Latency:    INSERT  ops    200  avg 433916.41  min  79519  max 653109  p99 608563  us
+  [36m[Run] [39m   45338 ms
+    Throughput:       4.41 ops/sec
+    Latency:    READ    ops     98  avg    933.19  min    676  max   5559  p99   5559  us
+                UPDATE  ops    102  avg 442945.90  min  69419  max 630189  p99 612765  us

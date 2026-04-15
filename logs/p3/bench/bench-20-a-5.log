@@ -1,0 +1,61 @@
+[33m[1mYCSB benchmark configuration:[39m[22m Args {
+    num_clis: 20,
+    num_ops: 200,
+    workload: 'a',
+    client_just_args: [
+        "p3::client",
+        "10.10.1.2:3666",
+    ],
+}
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+[33m[1mBenchmarking [Load] phase...[39m[22m
+  Launched 20 YCSB drivers, now waiting...
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+./kvstore/bin/kvclient --manager_addrs 10.10.1.2:3666
+[33m[1mBenchmarking [Run] phase...[39m[22m
+  Launched 20 YCSB drivers, now waiting...
+[33m[1mBenchmarking results:[39m[22m  [36mYCSB-a[39m  [35m20 clients[39m
+  [36m[Load][39m  147549 ms
+    Throughput:      27.11 ops/sec
+    Latency:    INSERT  ops   4000  avg 727464.47  min 155861  max 1266708  p99 1224851  us
+  [36m[Run] [39m   75957 ms
+    Throughput:      52.66 ops/sec
+    Latency:    READ    ops   2023  avg  37718.06  min    741  max 334023  p99 182027  us
+                UPDATE  ops   1977  avg 638916.81  min 198280  max 1069433  p99 999244  us
