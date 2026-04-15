@@ -57,34 +57,17 @@ REPO="$1"
 BRANCH="$2"
 MADKV="$HOME/madkv"
 
-echo "[$(hostname)] Installing system dependencies..."
-sudo apt-get update -qq
-sudo apt-get install -y -qq \
-    build-essential cmake ninja-build git \
-    libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
-    librocksdb-dev \
-    default-jre-headless \
-    curl pkg-config 2>&1 | tail -5
-
-# Install Rust if not present
-if ! command -v cargo &>/dev/null; then
-  echo "[$(hostname)] Installing Rust..."
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --quiet
-  source "$HOME/.cargo/env"
+# Remove existing repo if it exists
+if [[ -d "${MADKV}" ]]; then
+  echo "[$(hostname)] Removing existing repo at ${MADKV}..."
+  rm -rf "${MADKV}"
 fi
 
-# Clone or update the repo
-if [[ -d "${MADKV}/.git" ]]; then
-  echo "[$(hostname)] Pulling latest from ${BRANCH}..."
-  git -C "${MADKV}" fetch --quiet origin
-  git -C "${MADKV}" checkout --quiet "${BRANCH}"
-  git -C "${MADKV}" pull --quiet origin "${BRANCH}"
-else
-  echo "[$(hostname)] Cloning ${REPO} (${BRANCH})..."
-  git clone --quiet --branch "${BRANCH}" "${REPO}" "${MADKV}"
-fi
+# Clone the repo
+echo "[$(hostname)] Cloning ${REPO} (${BRANCH})..."
+git clone --quiet --branch "${BRANCH}" "${REPO}" "${MADKV}"
 
-# Build
+# Build the project
 echo "[$(hostname)] Building madkv..."
 source "$HOME/.cargo/env"
 cd "${MADKV}"
